@@ -1,89 +1,90 @@
 import asyncio
-from util import *
+from util import compress_image, decompress, decode_request, encode_response
 
 
 class ConferenceServer:
-    def __init__(self, ):
-        # async server
-        self.conference_id = None  # conference_id for distinguish difference conference
+    def __init__(self):
+        self.conference_id = None
         self.conf_serve_ports = None
         self.data_serve_ports = {}
-        self.data_types = ['screen', 'camera', 'audio']  # example data types in a video conference
+        self.data_types = ['screen', 'camera', 'audio']
         self.clients_info = None
         self.client_conns = None
-        self.mode = 'Client-Server'  # or 'P2P' if you want to support peer-to-peer conference mode
+        self.mode = 'Client-Server'
 
     async def handle_data(self, reader, writer, data_type):
-        """
-        running task: receive sharing stream data from a client and decide how to forward them to the rest clients
-        """
+        while True:
+            try:
+                data = await reader.read(1024)
+                if not data:
+                    break
+
+                decompressed_data = decompress(data)
+                print(f"Received {data_type} data")
+
+                for conn_writer in self.client_conns:
+                    if conn_writer is not writer:
+                        conn_writer.write(compress_image(decompressed_data))
+                        await conn_writer.drain()
+            except Exception as e:
+                print(f"Error in handle_data: {e}")
+                break
 
     async def handle_client(self, reader, writer):
-        """
-        running task: handle the in-meeting requests or messages from clients
-        """
+        try:
+            request_data = await reader.read(1024)
+            request = decode_request(request_data)
+            print("Client request:", request)
+
+            response = {"status": "ok"}
+            writer.write(encode_response(response))
+            await writer.drain()
+        except Exception as e:
+            print(f"Error in handle_client: {e}")
 
     async def log(self):
-        while self.running:
-            print('Something about server status')
-            await asyncio.sleep(LOG_INTERVAL)
+        while True:
+            print('Logging server status...')
+            await asyncio.sleep(5)
 
     async def cancel_conference(self):
-        """
-        handle cancel conference request: disconnect all connections to cancel the conference
-        """
+        for conn_writer in self.client_conns:
+            conn_writer.close()
+        self.client_conns.clear()
+        print("Conference canceled")
 
     def start(self):
-        '''
-        start the ConferenceServer and necessary running tasks to handle clients in this conference
-        '''
+        print(f"Starting ConferenceServer {self.conference_id}")
 
 
 class MainServer:
     def __init__(self, server_ip, main_port):
-        # async server
         self.server_ip = server_ip
         self.server_port = main_port
-        self.main_server = None
+        self.conference_servers = {}
 
-        self.conference_conns = None
-        self.conference_servers = {}  # self.conference_servers[conference_id] = ConferenceManager
-
-    def handle_creat_conference(self,):
-        """
-        create conference: create and start the corresponding ConferenceServer, and reply necessary info to client
-        """
+    def handle_create_conference(self):
+        print("Create conference")
 
     def handle_join_conference(self, conference_id):
-        """
-        join conference: search corresponding conference_info and ConferenceServer, and reply necessary info to client
-        """
-
-    def handle_quit_conference(self):
-        """
-        quit conference (in-meeting request & or no need to request)
-        """
-        pass
-
-    def handle_cancel_conference(self):
-        """
-        cancel conference (in-meeting request, a ConferenceServer should be closed by the MainServer)
-        """
-        pass
+        print(f"Join conference {conference_id}")
 
     async def request_handler(self, reader, writer):
-        """
-        running task: handle out-meeting (or also in-meeting) requests from clients
-        """
-        pass
+        try:
+            data = await reader.read(1024)
+            request = decode_request(data)
+            print("MainServer received:", request)
+
+            response = {"status": "ok"}
+            writer.write(encode_response(response))
+            await writer.drain()
+        except Exception as e:
+            print(f"Error in request_handler: {e}")
 
     def start(self):
-        """
-        start MainServer
-        """
-        pass
+        print("MainServer started")
 
 
 if __name__ == '__main__':
-    server = MainServer(SERVER_IP, MAIN_SERVER_PORT)
+    server = MainServer("127.0.0.1", 8000)
     server.start()
