@@ -146,5 +146,3 @@ def decompress_image(image_bytes):
     image = Image.open(img_byte_arr)
 
     return image
-
-
