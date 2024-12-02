@@ -1,204 +1,113 @@
-from util import *
 import socket
-import threading
-import json
-import time
+
+from util import *
+import config
+
 
 class ConferenceClient:
-    def __init__(self):
+    def __init__(self,):
+        # sync client
+        self.control_socket=None
+        self.screen_socket=None
+        self.camera_socket=None
+        self.audio_socket=None
+        self.word_socket=None
+
         self.is_working = True
-        self.server_addr = ('127.0.0.1', MAIN_SERVER_PORT)
-        self.on_meeting = False
-        self.conns = []
-        self.support_data_types = ['screen', 'camera', 'audio']
+        self.server_addr = None  # server addr
+        self.on_meeting = False  # status
+        self.conns = None  # you may need to maintain multiple conns for a single conference
+        self.support_data_types = []  # for some types of data
         self.share_data = {}
-        self.conference_info = None
-        self.recv_data = {}
+
+        self.conference_info = None  # you may need to save and update some conference_info regularly
+
+        self.recv_data = None  # you may need to save received streamd data from other clients in conference
 
     def create_conference(self):
         """
-        Create a conference: send create-conference request to server and obtain necessary data.
+        create a conference: send create-conference request to server and obtain necessary data to
         """
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'create'}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if 'conference_id' in response_data:
-                self.conference_info = response_data
-                self.conference_id = response_data['conference_id']
-                self.manager = response_data['manager']
-                print(f'Conference created. Conference ID: {self.conference_id}, Manager: {self.manager}')
-                self.on_meeting = True
-                self.start_conference()
-            else:
-                print('[Error]: Failed to create conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
+        pass
 
     def join_conference(self, conference_id):
         """
-        Join a conference: send join-conference request with given conference_id.
+        join a conference: send join-conference request with given conference_id, and obtain necessary data to
         """
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'join', 'conference_id': conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if 'conference_id' in response_data:
-                self.conference_info = response_data
-                self.conference_id = response_data['conference_id']
-                print(f'Joined conference {self.conference_id}')
-                self.on_meeting = True
-                self.start_conference()
-            else:
-                print('[Error]: Failed to join conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
+        pass
 
     def quit_conference(self):
         """
-        Quit your ongoing conference.
+        quit your on-going conference
         """
-        if not self.on_meeting:
-            print('[Warn]: Not in a conference.')
-            return
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'quit', 'conference_id': self.conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if response_data.get('status') == 'success':
-                print(f'Left conference {self.conference_id}')
-                self.close_conference()
-            else:
-                print('[Error]: Failed to quit conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
+        pass
 
     def cancel_conference(self):
         """
-        Cancel your ongoing conference (if you are the manager).
+        cancel your on-going conference (when you are the conference manager): ask server to close all clients
         """
-        if not self.on_meeting or self.manager != self.conference_info.get('manager'):
-            print('[Warn]: You are not the manager or not in a conference.')
-            return
+        pass
 
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
+    def keep_share_camera(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
+        '''
+        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
+        you can create different functions for sharing various kinds of data
+        '''
+        pass
 
-            request_data = {'action': 'cancel', 'conference_id': self.conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
+    def keep_share_screen(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
+        '''
+        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
+        you can create different functions for sharing various kinds of data
+        '''
+        pass
 
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
+    def keep_share_audio(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
+        '''
+        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
+        you can create different functions for sharing various kinds of data
+        '''
+        pass
 
-            if response_data.get('status') == 'success':
-                print(f'Conference {self.conference_id} canceled.')
-                self.close_conference()
-            else:
-                print('[Error]: Failed to cancel conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def keep_share(self, data_type, send_conn, capture_function, compress=None, fps_or_frequency=30):
-        """
-        Keep sharing certain type of data from server or clients (P2P).
-        """
-        if data_type not in self.support_data_types:
-            print(f'[Warn]: Unsupported data type {data_type}')
-            return
-
-        try:
-            while self.on_meeting:
-                data = capture_function()
-                if compress:
-                    data = compress(data)
-                send_conn.send(data)
-                time.sleep(1 / fps_or_frequency)
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def share_switch(self, data_type):
-        """
-        Switch for sharing certain types of data (screen, camera, audio, etc.)
-        """
-        if data_type not in self.share_data:
-            print(f'[Warn]: {data_type} is not enabled for sharing.')
-            return
-
-        self.share_data[data_type] = not self.share_data.get(data_type, False)
-        print(f'{"Started" if self.share_data[data_type] else "Stopped"} sharing {data_type}')
+    def keep_share_word(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
+        '''
+        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
+        you can create different functions for sharing various kinds of data
+        '''
+        pass
 
     def keep_recv(self, recv_conn, data_type, decompress=None):
-        """
-        Keep receiving certain types of data (save or output).
-        """
-        try:
-            while self.on_meeting:
-                data = recv_conn.recv(1024)
-                if decompress:
-                    data = decompress(data)
-                self.output_data(data)
-                time.sleep(0.1)
+        '''
+        running task: keep receiving certain type of data (save or output)
+        you can create other functions for receiving various kinds of data
+        '''
 
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def output_data(self, data):
-        """
-        Output received stream data.
-        """
-        print(f'Received data: {data}')
+    def output_data(self):
+        '''
+        running task: output received stream data
+        '''
 
     def start_conference(self):
-        """
-        Initialize connections and start running tasks for the conference.
-        """
-        print(f'Starting conference {self.conference_id}')
-        self.on_meeting = True
+        '''
+        init conns when create or join a conference with necessary conference_info
+        and
+        start necessary running task for conference
+        '''
 
     def close_conference(self):
-        """
-        Close all connections and cancel running tasks.
-        """
-        self.on_meeting = False
-        print(f'Conference {self.conference_id} closed.')
+        '''
+        close all conns to servers or other clients and cancel the running tasks
+        pay attention to the exception handling
+        '''
 
     def start(self):
         """
-        Execute functions based on the command line input.
+        execute functions based on the command line input
         """
+        # 创建client时，先和主服务器取得链接
+        self.control_socket=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        self.control_socket.connect((SERVER_IP,MAIN_SERVER_PORT))
+
         while True:
             if not self.on_meeting:
                 status = 'Free'
@@ -226,6 +135,7 @@ class ConferenceClient:
                         self.join_conference(input_conf_id)
                     else:
                         print('[Warn]: Input conference ID must be in digital form')
+                #TODO: DELETE SWITCH
                 elif fields[0] == 'switch':
                     data_type = fields[1]
                     if data_type in self.share_data.keys():
