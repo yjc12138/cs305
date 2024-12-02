@@ -88,7 +88,7 @@ class MainServer:
         """
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
-            conference_server.remove_client(client_id)
+            conference_server.handle_client(client_id)
             message = "Client removed"
         else:
             message = "Conference not found"
