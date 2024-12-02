@@ -57,7 +57,8 @@ class MainServer:
         conference_server = ConferenceServer(conference_id)
         self.conference_servers[conference_id] = conference_server
         asyncio.create_task(conference_server.start())
-        return conference_id
+        message = create_message("string", conference_id)
+        return message
 
     def handle_join_conference(self, conference_id, client_id):
         """
@@ -66,8 +67,10 @@ class MainServer:
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.clients_info.append(client_id)
-            return "Client joined"
-        else: return "Conference not found"
+            message = create_message("string", "Client joined")
+        else:
+            message = create_message("string", "Conference not found")
+        return message
 
     def handle_quit_conference(self, conference_id, client_id):
         """
@@ -76,8 +79,10 @@ class MainServer:
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.remove_client(client_id)
-            return "Client removed"
-        else: return "Conference not found"
+            message = create_message("string", "Client removed")
+        else:
+            message = create_message("string", "Conference not found")
+        return message
 
     def handle_cancel_conference(self, conference_id):
         """
@@ -87,8 +92,10 @@ class MainServer:
             conference_server = self.conference_servers[conference_id]
             conference_server.cancel_conference()
             del self.conference_servers[conference_id]
-            return "Conference cancelled"
-        else: return "Conference not found"
+            message = create_message("string", "Conference cancelled")
+        else:
+            message = create_message("string", "Conference not found")
+        return message
 
     async def request_handler(self, reader, writer):
         """
@@ -111,9 +118,9 @@ class MainServer:
         elif message.startswith("CANCEL"):
             conference_id = message.split()[1]
             response = self.handle_cancel_conference(conference_id)
-        else: response = "wrong message"
+        else: response = create_message("string", "wrong message")
 
-        writer.write(response.encode())
+        writer.write(response)
         await writer.drain()
         writer.close()
 
