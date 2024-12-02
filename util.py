@@ -1,17 +1,27 @@
+'''
+Simple util implementation for video conference
+Including data capture, image compression and image overlap
+Note that you can use your own implementation as well :)
+'''
 from io import BytesIO
-import json
 import pyaudio
 import cv2
 import pyautogui
 import numpy as np
 from PIL import Image, ImageGrab
 from config import *
+import time
+import json
+import struct
+from datetime import datetime
 
+# audio setting
 FORMAT = pyaudio.paInt16
 audio = pyaudio.PyAudio()
 streamin = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
 streamout = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
 
+# print warning if no available camera
 cap = cv2.VideoCapture(0)
 if cap.isOpened():
     can_capture_camera = True
@@ -31,18 +41,25 @@ def resize_image_to_fit_screen(image, my_screen_size):
     aspect_ratio = original_width / original_height
 
     if screen_width / screen_height > aspect_ratio:
+        # resize according to height
         new_height = screen_height
         new_width = int(new_height * aspect_ratio)
     else:
+        # resize according to width
         new_width = screen_width
         new_height = int(new_width / aspect_ratio)
 
+    # resize the image
     resized_image = image.resize((new_width, new_height), Image.LANCZOS)
 
     return resized_image
 
 
 def overlay_camera_images(screen_image, camera_images):
+    """
+    screen_image: PIL.Image
+    camera_images: list[PIL.Image]
+    """
     if screen_image is None and camera_images is None:
         print('[Warn]: cannot display when screen and camera are both None')
         return None
@@ -50,14 +67,17 @@ def overlay_camera_images(screen_image, camera_images):
         screen_image = resize_image_to_fit_screen(screen_image, my_screen_size)
 
     if camera_images is not None:
+        # make sure same camera images
         if not all(img.size == camera_images[0].size for img in camera_images):
             raise ValueError("All camera images must have the same size")
 
         screen_width, screen_height = my_screen_size if screen_image is None else screen_image.size
         camera_width, camera_height = camera_images[0].size
 
+        # calculate num_cameras_per_row
         num_cameras_per_row = screen_width // camera_width
 
+        # adjust camera_imgs
         if len(camera_images) > num_cameras_per_row:
             adjusted_camera_width = screen_width // len(camera_images)
             adjusted_camera_height = (adjusted_camera_width * camera_height) // camera_width
@@ -66,11 +86,12 @@ def overlay_camera_images(screen_image, camera_images):
             camera_width, camera_height = adjusted_camera_width, adjusted_camera_height
             num_cameras_per_row = len(camera_images)
 
+        # if no screen_img, create a container
         if screen_image is None:
             display_image = Image.fromarray(np.zeros((camera_width, my_screen_size[1], 3), dtype=np.uint8))
         else:
             display_image = screen_image
-
+        # cover screen_img using camera_images
         for i, camera_image in enumerate(camera_images):
             row = i // num_cameras_per_row
             col = i % num_cameras_per_row
@@ -84,11 +105,14 @@ def overlay_camera_images(screen_image, camera_images):
 
 
 def capture_screen():
+    # capture screen with the resolution of display
+    # img = pyautogui.screenshot()
     img = ImageGrab.grab()
     return img
 
 
 def capture_camera():
+    # capture frame of camera
     ret, frame = cap.read()
     if not ret:
         raise Exception('Fail to capture frame from camera')
@@ -100,6 +124,14 @@ def capture_voice():
 
 
 def compress_image(image, format='JPEG', quality=85):
+    """
+    compress image and output Bytes
+
+    :param image: PIL.Image, input image
+    :param format: str, output format ('JPEG', 'PNG', 'WEBP', ...)
+    :param quality: int, compress quality (0-100), 85 default
+    :return: bytes, compressed image data
+    """
     img_byte_arr = BytesIO()
     image.save(img_byte_arr, format=format, quality=quality)
     img_byte_arr = img_byte_arr.getvalue()
@@ -107,22 +139,100 @@ def compress_image(image, format='JPEG', quality=85):
     return img_byte_arr
 
 
-def decompress(image_bytes):
+def decompress_image(image_bytes):
+    """
+    decompress bytes to PIL.Image
+    :param image_bytes: bytes, compressed data
+    :return: PIL.Image
+    """
     img_byte_arr = BytesIO(image_bytes)
     image = Image.open(img_byte_arr)
 
     return image
 
 
-def decode_request(data):
-    try:
-        return json.loads(data.decode('utf-8'))
-    except Exception as e:
-        raise ValueError(f"Failed to decode request: {e}")
+def capture_video_frame():
+    """捕获视频帧"""
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    cap.release()
+    return frame if ret else None
 
 
-def encode_response(response):
+def compress_frame(frame, quality=80):
+    """压缩视频帧"""
+    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buffer.tobytes()
+
+
+def decompress_frame(buffer):
+    """解压视频帧"""
+    nparr = np.frombuffer(buffer, np.uint8)
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+
+class AudioHandler:
+    def __init__(self):
+        self.p = pyaudio.PyAudio()
+        self.stream = None
+
+    def start_recording(self):
+        """开始录音"""
+        self.stream = self.p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=44100,
+            input=True,
+            frames_per_buffer=1024
+        )
+
+    def stop_recording(self):
+        """停止录音"""
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+
+    def read_audio(self):
+        """读取音频数据"""
+        return self.stream.read(1024) if self.stream else None
+
+    def __del__(self):
+        self.p.terminate()
+
+
+def mix_audio_streams(streams):
+    """混合多个音频流"""
+    if not streams:
+        return None
+    # 将字节转换为数组
+    arrays = [np.frombuffer(s, dtype=np.int16) for s in streams]
+    # 确保所有数组长度相同
+    min_length = min(len(a) for a in arrays)
+    arrays = [a[:min_length] for a in arrays]
+    # 混合音频
+    mixed = np.mean(arrays, axis=0).astype(np.int16)
+    return mixed.tobytes()
+
+
+def create_message(msg_type, data):
+    """创建消息包"""
+    message = {
+        'type': msg_type,
+        'timestamp': datetime.now().isoformat(),
+        'data': data
+    }
+    return json.dumps(message).encode()
+
+
+def parse_message(message):
+    """解析消息包"""
     try:
-        return json.dumps(response).encode('utf-8')
-    except Exception as e:
-        raise ValueError(f"Failed to encode response: {e}")
+        decoded = json.loads(message.decode())
+        return decoded['type'], decoded['timestamp'], decoded['data']
+    except:
+        return None, None, None
+
+
+def get_timestamp():
+    """获取当前时间戳"""
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

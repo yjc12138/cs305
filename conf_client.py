@@ -1,244 +1,285 @@
-from util import *
+import asyncio
 import socket
 import threading
-import json
-import time
+from config import *
+from util import *
+
 
 class ConferenceClient:
     def __init__(self):
         self.is_working = True
-        self.server_addr = ('127.0.0.1', MAIN_SERVER_PORT)
+        self.server_addr = (SERVER_HOST, SERVER_PORT)
         self.on_meeting = False
-        self.conns = []
-        self.support_data_types = ['screen', 'camera', 'audio']
-        self.share_data = {}
-        self.conference_info = None
-        self.recv_data = {}
+        self.conference_id = None
+        self.username = None
+        self.video_enabled = False
+        self.audio_enabled = False
+
+        self.control_socket = None
+        self.video_socket = None
+        self.audio_socket = None
+        self.chat_socket = None
+
+        self.video_cap = None
+        self.audio_handler = None
+
+        self.video_thread = None
+        self.audio_thread = None
+        self.receive_thread = None
+
+    async def connect_to_server(self):
+        """连接到服务器"""
+        try:
+            # 控制连接
+            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.control_socket.connect(self.server_addr)
+
+            # 视频连接
+            self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.video_socket.bind(('', 0))
+
+            # 音频连接
+            self.audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.audio_socket.bind(('', 0))
+
+            # 聊天连接
+            self.chat_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.chat_socket.connect((SERVER_HOST, CHAT_PORT))
+
+            return True
+        except Exception as e:
+            print(f"连接服务器失败: {e}")
+            return False
 
     def create_conference(self):
-        """
-        Create a conference: send create-conference request to server and obtain necessary data.
-        """
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'create'}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if 'conference_id' in response_data:
-                self.conference_info = response_data
-                self.conference_id = response_data['conference_id']
-                self.manager = response_data['manager']
-                print(f'Conference created. Conference ID: {self.conference_id}, Manager: {self.manager}')
-                self.on_meeting = True
-                self.start_conference()
-            else:
-                print('[Error]: Failed to create conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
+        """创建会议"""
+        msg = create_message(MessageType.CREATE_CONFERENCE, {
+            'username': self.username
+        })
+        self.control_socket.send(msg)
+        response = self.control_socket.recv(BUFFER_SIZE)
+        type, _, data = parse_message(response)
+        if type == MessageType.SUCCESS:
+            self.conference_id = data['conference_id']
+            self.on_meeting = True
+            self.start_conference()
+            return True
+        return False
 
     def join_conference(self, conference_id):
-        """
-        Join a conference: send join-conference request with given conference_id.
-        """
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'join', 'conference_id': conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if 'conference_id' in response_data:
-                self.conference_info = response_data
-                self.conference_id = response_data['conference_id']
-                print(f'Joined conference {self.conference_id}')
-                self.on_meeting = True
-                self.start_conference()
-            else:
-                print('[Error]: Failed to join conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def quit_conference(self):
-        """
-        Quit your ongoing conference.
-        """
-        if not self.on_meeting:
-            print('[Warn]: Not in a conference.')
-            return
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'quit', 'conference_id': self.conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if response_data.get('status') == 'success':
-                print(f'Left conference {self.conference_id}')
-                self.close_conference()
-            else:
-                print('[Error]: Failed to quit conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def cancel_conference(self):
-        """
-        Cancel your ongoing conference (if you are the manager).
-        """
-        if not self.on_meeting or self.manager != self.conference_info.get('manager'):
-            print('[Warn]: You are not the manager or not in a conference.')
-            return
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(self.server_addr)
-
-            request_data = {'action': 'cancel', 'conference_id': self.conference_id}
-            sock.send(json.dumps(request_data).encode('utf-8'))
-
-            response = sock.recv(1024)
-            response_data = json.loads(response.decode('utf-8'))
-
-            if response_data.get('status') == 'success':
-                print(f'Conference {self.conference_id} canceled.')
-                self.close_conference()
-            else:
-                print('[Error]: Failed to cancel conference')
-
-            sock.close()
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def keep_share(self, data_type, send_conn, capture_function, compress=None, fps_or_frequency=30):
-        """
-        Keep sharing certain type of data from server or clients (P2P).
-        """
-        if data_type not in self.support_data_types:
-            print(f'[Warn]: Unsupported data type {data_type}')
-            return
-
-        try:
-            while self.on_meeting:
-                data = capture_function()
-                if compress:
-                    data = compress(data)
-                send_conn.send(data)
-                time.sleep(1 / fps_or_frequency)
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def share_switch(self, data_type):
-        """
-        Switch for sharing certain types of data (screen, camera, audio, etc.)
-        """
-        if data_type not in self.share_data:
-            print(f'[Warn]: {data_type} is not enabled for sharing.')
-            return
-
-        self.share_data[data_type] = not self.share_data.get(data_type, False)
-        print(f'{"Started" if self.share_data[data_type] else "Stopped"} sharing {data_type}')
-
-    def keep_recv(self, recv_conn, data_type, decompress=None):
-        """
-        Keep receiving certain types of data (save or output).
-        """
-        try:
-            while self.on_meeting:
-                data = recv_conn.recv(1024)
-                if decompress:
-                    data = decompress(data)
-                self.output_data(data)
-                time.sleep(0.1)
-
-        except Exception as e:
-            print(f'[Error]: {str(e)}')
-
-    def output_data(self, data):
-        """
-        Output received stream data.
-        """
-        print(f'Received data: {data}')
+        """加入会议"""
+        msg = create_message(MessageType.JOIN_CONFERENCE, {
+            'username': self.username,
+            'conference_id': conference_id
+        })
+        self.control_socket.send(msg)
+        response = self.control_socket.recv(BUFFER_SIZE)
+        type, _, data = parse_message(response)
+        if type == MessageType.SUCCESS:
+            self.conference_id = conference_id
+            self.on_meeting = True
+            self.start_conference()
+            return True
+        return False
 
     def start_conference(self):
-        """
-        Initialize connections and start running tasks for the conference.
-        """
-        print(f'Starting conference {self.conference_id}')
-        self.on_meeting = True
+        """启动会议相关线程"""
+        if self.on_meeting:
+            # 启动视频线程
+            self.video_thread = threading.Thread(target=self.video_loop)
+            self.video_thread.start()
 
-    def close_conference(self):
-        """
-        Close all connections and cancel running tasks.
-        """
+            # 启动音频线程
+            self.audio_thread = threading.Thread(target=self.audio_loop)
+            self.audio_thread.start()
+
+            # 启动接收线程
+            self.receive_thread = threading.Thread(target=self.receive_loop)
+            self.receive_thread.start()
+
+    def video_loop(self):
+        """视频循环"""
+        self.video_cap = cv2.VideoCapture(0)
+        while self.on_meeting and self.video_enabled:
+            ret, frame = self.video_cap.read()
+            if ret:
+                compressed = compress_frame(frame)
+                msg = create_message(MessageType.VIDEO_FRAME, {
+                    'conference_id': self.conference_id,
+                    'username': self.username,
+                    'data': compressed
+                })
+                self.video_socket.sendto(msg, (SERVER_HOST, VIDEO_PORT))
+            time.sleep(1 / VIDEO_FRAME_RATE)
+
+    def audio_loop(self):
+        """音频循环"""
+        self.audio_handler = AudioHandler()
+        while self.on_meeting and self.audio_enabled:
+            audio_data = self.audio_handler.read_audio()
+            if audio_data:
+                msg = create_message(MessageType.AUDIO_DATA, {
+                    'conference_id': self.conference_id,
+                    'username': self.username,
+                    'data': audio_data
+                })
+                self.audio_socket.sendto(msg, (SERVER_HOST, AUDIO_PORT))
+
+    def receive_loop(self):
+        """接收循环"""
+        while self.on_meeting:
+            try:
+                data = self.control_socket.recv(BUFFER_SIZE)
+                if data:
+                    type, timestamp, content = parse_message(data)
+                    self.handle_message(type, timestamp, content)
+            except Exception as e:
+                print(f"接收数据错误: {e}")
+                break
+
+    def handle_message(self, msg_type, timestamp, data):
+        """处理接收到的消息"""
+        if msg_type == MessageType.VIDEO_FRAME:
+            # 处理视频帧
+            frame = decompress_frame(data['data'])
+            # 显示视频帧
+            cv2.imshow(f"User: {data['username']}", frame)
+
+        elif msg_type == MessageType.AUDIO_DATA:
+            # 处理音频数据
+            # 播放音频
+            pass
+
+        elif msg_type == MessageType.CHAT_MESSAGE:
+            # 显示聊天消息
+            print(f"[{timestamp}] {data['username']}: {data['message']}")
+
+    def quit_conference(self):
+        """退出会议"""
+        if self.on_meeting:
+            msg = create_message(MessageType.QUIT_CONFERENCE, {
+                'conference_id': self.conference_id,
+                'username': self.username
+            })
+            self.control_socket.send(msg)
+            self.cleanup()
+
+    def cleanup(self):
+        """清理资源"""
         self.on_meeting = False
-        print(f'Conference {self.conference_id} closed.')
+        if self.video_cap:
+            self.video_cap.release()
+        if self.audio_handler:
+            self.audio_handler.stop_recording()
+        cv2.destroyAllWindows()
 
-    def start(self):
-        """
-        Execute functions based on the command line input.
-        """
-        while True:
-            if not self.on_meeting:
-                status = 'Free'
+    def __del__(self):
+        """析构函数"""
+        self.cleanup()
+        if self.control_socket:
+            self.control_socket.close()
+        if self.video_socket:
+            self.video_socket.close()
+        if self.audio_socket:
+            self.audio_socket.close()
+        if self.chat_socket:
+            self.chat_socket.close()
+
+
+def print_menu():
+    """打印菜单"""
+    print("\n=== 视频会议系统 ===")
+    print("1. 连接服务器")
+    print("2. 创建会议")
+    print("3. 加入会议")
+    print("4. 退出会议")
+    print("5. 开关视频")
+    print("6. 开关音频")
+    print("0. 退出系统")
+    print("================")
+
+
+async def main():
+    client = ConferenceClient()
+
+    while True:
+        print_menu()
+        choice = input("请选择操作: ")
+
+        if choice == "1":
+            # 连接服务器
+            username = input("请输入用户名: ")
+            client.username = username
+            if await client.connect_to_server():
+                print("连接服务器成功！")
             else:
-                status = f'OnMeeting-{self.conference_id}'
+                print("连接服务器失败！")
 
-            recognized = True
-            cmd_input = input(f'({status}) Please enter a operation (enter "?" to help): ').strip().lower()
-            fields = cmd_input.split(maxsplit=1)
-            if len(fields) == 1:
-                if cmd_input in ('?', '？'):
-                    print(HELP)
-                elif cmd_input == 'create':
-                    self.create_conference()
-                elif cmd_input == 'quit':
-                    self.quit_conference()
-                elif cmd_input == 'cancel':
-                    self.cancel_conference()
-                else:
-                    recognized = False
-            elif len(fields) == 2:
-                if fields[0] == 'join':
-                    input_conf_id = fields[1]
-                    if input_conf_id.isdigit():
-                        self.join_conference(input_conf_id)
-                    else:
-                        print('[Warn]: Input conference ID must be in digital form')
-                elif fields[0] == 'switch':
-                    data_type = fields[1]
-                    if data_type in self.share_data.keys():
-                        self.share_switch(data_type)
-                else:
-                    recognized = False
+        elif choice == "2":
+            # 创建会议
+            if not client.control_socket:
+                print("请先连接服务器！")
+                continue
+            if client.create_conference():
+                print(f"会议创建成功！会议ID: {client.conference_id}")
             else:
-                recognized = False
+                print("创建会议失败！")
 
-            if not recognized:
-                print(f'[Warn]: Unrecognized cmd_input {cmd_input}')
+        elif choice == "3":
+            # 加入会议
+            if not client.control_socket:
+                print("请先连接服务器！")
+                continue
+            conference_id = input("请输入会议ID: ")
+            if client.join_conference(conference_id):
+                print("加入会议成功！")
+            else:
+                print("加入会议失败！")
+
+        elif choice == "4":
+            # 退出会议
+            if not client.on_meeting:
+                print("当前不在会议中！")
+                continue
+            client.quit_conference()
+            print("已退出会议")
+
+        elif choice == "5":
+            # 开关视频
+            if not client.on_meeting:
+                print("请先加入会议！")
+                continue
+            client.video_enabled = not client.video_enabled
+            status = "开启" if client.video_enabled else "关闭"
+            print(f"视频已{status}")
+
+        elif choice == "6":
+            # 开关音频
+            if not client.on_meeting:
+                print("请先加入会议！")
+                continue
+            client.audio_enabled = not client.audio_enabled
+            status = "开启" if client.audio_enabled else "关闭"
+            print(f"音频已{status}")
+
+        elif choice == "0":
+            # 退出系统
+            print("正在退出系统...")
+            client.cleanup()
+            break
+
+        else:
+            print("无效的选择，请重试！")
 
 
-if __name__ == '__main__':
-    client1 = ConferenceClient()
-    client1.start()
+if __name__ == "__main__":
+    import asyncio
+
+    try:
+        # 对于 Python 3.7+
+        asyncio.run(main())
+    except AttributeError:
+        # 对于 Python 3.6
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+
