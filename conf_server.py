@@ -115,7 +115,7 @@ class MainServer:
         message = data.decode()
         addr = writer.get_extra_info('peername')
 
-        client_id = f"{addr[0]}:{addr[1]}"
+        client_id = f"{addr[0]}"
 
         if message.startswith("CREATE"):
             response = self.handle_create_conference()
@@ -135,10 +135,12 @@ class MainServer:
         writer.close()
 
     async def start(self):
+        print(f"Starting server at {self.server_ip}:{self.server_port}")
         self.main_server = await asyncio.start_server(self.request_handler, self.server_ip, self.server_port)
+        print(f"Server started, listening on {self.server_ip}:{self.server_port}")
         await self.main_server.serve_forever()
 
 
 if __name__ == '__main__':
-    server = MainServer("127.0.0.1", 8000)
+    server = MainServer('10.25.120.234', 8000)
     asyncio.run(server.start())
