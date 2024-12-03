@@ -4,47 +4,97 @@ import uuid
 from util import *
 
 class ConferenceServer:
-    def __init__(self, conference_id, conf_serve_ports):
+    def __init__(self, conference_id, server_ip, conf_serve_port):
         self.conference_id = conference_id
-        self.conf_serve_ports = conf_serve_ports
-        self.data_serve_ports = {'screen': conf_serve_ports + 1,
-                                 'camera': conf_serve_ports + 2,
-                                 'audio' : conf_serve_ports + 3}
+        self.server_ip = server_ip
+        self.conf_server_port = conf_serve_port
+        screen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        screen_socket.bind((server_ip, conf_serve_port + 1))
+        camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        camera_socket.bind((server_ip, conf_serve_port + 2))
+        audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        audio_socket.bind((server_ip, conf_serve_port + 3))
+        self.data_servers = {'screen': screen_socket, 'camera': camera_socket, 'audio': audio_socket}
         self.data_types = ['screen', 'camera', 'audio']
         self.clients_info = []
         self.client_conns = {}
         self.mode = 'Client-Server'
+        self.running = False
 
-    async def handle_data(self, reader, writer, data_type):
+    async def handle_data(self, data_type):
         """
         running task: receive sharing stream data from a client and decide how to forward them to the rest clients
         """
+        while self.running:
+            data_server = self.data_servers[data_type]
+            if data_type == 'screen':
+                data_port = CLIENT_SCREEN_PORT
+            elif data_type == 'camera':
+                data_port = CLIENT_CAMERA_PORT
+            else:
+                data_port = CLIENT_AUDIO_PORT
+            data, addr = await data_server.recvfrom(1024)
+            for client_ip in self.clients_info:
+                await data_server.sendto(data, (client_ip, data_port))
 
-    async def handle_client(self, client_id):
+    async def handle_text(self, reader, writer):
+        while self.running:
+            data = await reader.read(1024)
+            if data:
+                for client_conn in self.client_conns:
+                    if client_conn != writer:
+                        client_conn.write(data)
+                        await client_conn.drain()
+
+    def handle_client(self, client_id):
         """
+        conference_id: str ip
+
         running task: handle the in-meeting requests or messages from clients
         """
-        if client_id in self.clients_info:
-            self.clients_info.append(client_id)
-            self.client_conns = {}
+        while self.running:
+            if client_id in self.clients_info:
+                self.clients_info.remove(client_id)
+                self.client_conns.pop(client_id)
+            else:
+                try:
+                    control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    control_socket.connect(client_id)
+                    self.client_conns[client_id] = control_socket
+                except socket.error as e:
+                    print(f'socket error: {e}')
+                    return
+                self.clients_info.append(client_id)
 
-        else:
-            self.clients_info.remove(client_id)
 
     async def log(self):
         while self.running:
-            print('Something about server status')
+            print('Server alive')
             await asyncio.sleep(LOG_INTERVAL)
 
     async def cancel_conference(self):
         """
         handle cancel conference request: disconnect all connections to cancel the conference
         """
+        if self.running:
+            self.client_conns.clear()
+            self.clients_info.clear()
+            self.running = False
 
     def start(self):
         '''
         start the ConferenceServer and necessary running tasks to handle clients in this conference
         '''
+        self.running = True
+        loop = asyncio.get_event_loop()
+        tasks = [loop.create_task(self.handle_data('screen')),
+                 loop.create_task(self.handle_data('camera')),
+                 loop.create_task(self.handle_data('audio')),
+                 loop.create_task(asyncio.start_server(self.handle_text, self.server_ip, self.conf_server_port)),]
+        try:
+            loop.run_until_complete(asyncio.gather(*tasks))
+        finally:
+            loop.close()
 
 
 class MainServer:
