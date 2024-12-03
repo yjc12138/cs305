@@ -1,50 +1,99 @@
 import asyncio
 import uuid
+import socket
 
 from util import *
 
 class ConferenceServer:
-    def __init__(self, conference_id, conf_serve_ports):
+    def __init__(self, conference_id, server_ip, conf_serve_port):
         self.conference_id = conference_id
-        self.conf_serve_ports = conf_serve_ports
-        self.data_serve_ports = {'screen': conf_serve_ports + 1,
-                                 'camera': conf_serve_ports + 2,
-                                 'audio' : conf_serve_ports + 3}
+        self.server_ip = server_ip
+        self.conf_server_port = conf_serve_port
+        screen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        screen_socket.bind((server_ip, conf_serve_port + 1))
+        camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        camera_socket.bind((server_ip, conf_serve_port + 2))
+        audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        audio_socket.bind((server_ip, conf_serve_port + 3))
+        self.data_servers = {'screen': screen_socket, 'camera': camera_socket, 'audio': audio_socket}
         self.data_types = ['screen', 'camera', 'audio']
         self.clients_info = []
         self.client_conns = {}
         self.mode = 'Client-Server'
+        self.running = False
 
-    async def handle_data(self, reader, writer, data_type):
+    async def handle_data(self, data_type):
         """
         running task: receive sharing stream data from a client and decide how to forward them to the rest clients
         """
+        while self.running:
+            data_server = self.data_servers[data_type]
+            data, addr = await data_server.recvfrom(1024)
+            for client_ip in self.clients_info:
+                client_addr = client_ip.split(':')
+                if client_addr != addr:
+                    await data_server.sendto(data, client_addr)
 
-    async def handle_client(self, client_id):
+    async def handle_text(self, reader, writer):
+        while self.running:
+            data = await reader.read(1024)
+            if data:
+                for client_conn in self.client_conns:
+                    if client_conn != writer:
+                        client_conn.write(data)
+                        await client_conn.drain()
+
+    def handle_client(self, client_id):
         """
+        conference_id: str ip
+
         running task: handle the in-meeting requests or messages from clients
         """
-        if client_id in self.clients_info:
-            self.clients_info.append(client_id)
-            self.client_conns = {}
+        while self.running:
+            if client_id in self.clients_info:
+                self.clients_info.remove(client_id)
+                self.client_conns.pop(client_id)
+            else:
+                try:
+                    control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    control_socket.connect(client_id)
+                    self.client_conns[client_id] = control_socket
+                except socket.error as e:
+                    print(f'socket error: {e}')
+                    return
+                self.clients_info.append(client_id)
 
-        else:
-            self.clients_info.remove(client_id)
 
     async def log(self):
         while self.running:
-            print('Something about server status')
+            print('Server alive')
             await asyncio.sleep(LOG_INTERVAL)
 
     async def cancel_conference(self):
         """
         handle cancel conference request: disconnect all connections to cancel the conference
         """
+        if self.running:
+            for client_conn in self.client_conns:
+                client_conn.close()
+            self.client_conns.clear()
+            self.clients_info.clear()
+            self.running = False
 
     def start(self):
         '''
         start the ConferenceServer and necessary running tasks to handle clients in this conference
         '''
+        self.running = True
+        loop = asyncio.get_event_loop()
+        tasks = [loop.create_task(self.handle_data('screen')),
+                 loop.create_task(self.handle_data('camera')),
+                 loop.create_task(self.handle_data('audio')),
+                 loop.create_task(asyncio.start_server(self.handle_text, self.server_ip, self.conf_server_port)),]
+        try:
+            loop.run_until_complete(asyncio.gather(*tasks))
+        finally:
+            loop.close()
 
 
 class MainServer:
@@ -117,25 +166,33 @@ class MainServer:
 
         client_id = f"{addr[0]}:{addr[1]}"
 
-        if message.startswith("CREATE"):
+        if message.startswith("create"):
+            print(f"{client_id}: create conference")
             response = self.handle_create_conference()
-        elif message.startswith("JOIN"):
+        elif message.startswith("join"):
             conference_id = message.split()[1]
+            print(f"{client_id}: join conference {conference_id}")
             response = self.handle_join_conference(conference_id, client_id)
-        elif message.startswith("QUIT"):
+        elif message.startswith("quit"):
             conference_id = message.split()[1]
+            print(f"{client_id}: quit conference {conference_id}")
             response = self.handle_quit_conference(conference_id, client_id)
-        elif message.startswith("CANCEL"):
+        elif message.startswith("cancel"):
             conference_id = message.split()[1]
+            print(f"{client_id}: cancel conference {conference_id}")
             response = self.handle_cancel_conference(conference_id)
-        else: response = "wrong message"
+        else:
+            print("wrong command")
+            response = "wrong message"
 
         writer.write(response)
         await writer.drain()
         writer.close()
 
     async def start(self):
+        print(f"Starting server at {self.server_ip}:{self.server_port}")
         self.main_server = await asyncio.start_server(self.request_handler, self.server_ip, self.server_port)
+        print(f"Server started, listening on {self.server_ip}:{self.server_port}")
         await self.main_server.serve_forever()
 
 

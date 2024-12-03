@@ -176,9 +176,6 @@ class ConferenceClient:
             traceback.print_exc()
             return False
 
-    import time
-    import cv2
-
     def keep_share_camera(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
         """
         向服务器实时传输摄像头的视频流
@@ -264,7 +261,6 @@ class ConferenceClient:
         '''
         pass
 
-
     def output_data(self, data, type):
         '''
         running task: output received stream data
@@ -278,7 +274,6 @@ class ConferenceClient:
                     cv2.waitKey(1)  # 确保显示更新
             except Exception as e:
                 print(f"显示摄像头视频时发生错误: {e}")
-
 
     def start(self):
         """
