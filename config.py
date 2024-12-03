@@ -1,8 +1,7 @@
 HELP = 'Create         : create an conference\n' \
        'Join [conf_id ]: join a conference with conference ID\n' \
        'Quit           : quit an on-going conference\n' \
-       'Cancel         : cancel your on-going conference (only the manager)\n\n'\
-       'exit         : exit this program\n'
+       'Cancel         : cancel your on-going conference (only the manager)\n\n'
 
 SERVER_IP = '10.25.120.234'
 MAIN_SERVER_PORT = 8000
