@@ -78,6 +78,8 @@ class ConferenceServer:
         handle cancel conference request: disconnect all connections to cancel the conference
         """
         if self.running:
+            for client_conn in self.client_conns:
+                client_conn.close()
             self.client_conns.clear()
             self.clients_info.clear()
             self.running = False
