@@ -238,6 +238,8 @@ class ConferenceClient:
                     self.quit_conference()
                 elif cmd_input == 'cancel':
                     self.cancel_conference()
+                elif cmd_input == 'exit':
+                    break
                 else:
                     recognized = False
             elif len(fields) == 2:

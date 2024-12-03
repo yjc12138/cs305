@@ -1,9 +1,10 @@
 HELP = 'Create         : create an conference\n' \
        'Join [conf_id ]: join a conference with conference ID\n' \
        'Quit           : quit an on-going conference\n' \
-       'Cancel         : cancel your on-going conference (only the manager)\n\n'
+       'Cancel         : cancel your on-going conference (only the manager)\n\n'\
+       'exit         : exit this program\n'
 
-SERVER_IP = '127.0.0.1'
+SERVER_IP = '10.25.120.234'
 MAIN_SERVER_PORT = 8000
 TIMEOUT_SERVER = 5
 # DGRAM_SIZE = 1500  # UDP
