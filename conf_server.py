@@ -117,25 +117,33 @@ class MainServer:
 
         client_id = f"{addr[0]}:{addr[1]}"
 
-        if message.startswith("CREATE"):
+        if message.startswith("create"):
+            print(f"{client_id}: create conference")
             response = self.handle_create_conference()
-        elif message.startswith("JOIN"):
+        elif message.startswith("join"):
             conference_id = message.split()[1]
+            print(f"{client_id}: join conference {conference_id}")
             response = self.handle_join_conference(conference_id, client_id)
-        elif message.startswith("QUIT"):
+        elif message.startswith("quit"):
             conference_id = message.split()[1]
+            print(f"{client_id}: quit conference {conference_id}")
             response = self.handle_quit_conference(conference_id, client_id)
-        elif message.startswith("CANCEL"):
+        elif message.startswith("cancel"):
             conference_id = message.split()[1]
+            print(f"{client_id}: cancel conference {conference_id}")
             response = self.handle_cancel_conference(conference_id)
-        else: response = "wrong message"
+        else:
+            print("wrong command")
+            response = "wrong message"
 
         writer.write(response)
         await writer.drain()
         writer.close()
 
     async def start(self):
+        print(f"Starting server at {self.server_ip}:{self.server_port}")
         self.main_server = await asyncio.start_server(self.request_handler, self.server_ip, self.server_port)
+        print(f"Server started, listening on {self.server_ip}:{self.server_port}")
         await self.main_server.serve_forever()
 
 
