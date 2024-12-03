@@ -10,10 +10,7 @@ import pyautogui
 import numpy as np
 from PIL import Image, ImageGrab
 from config import *
-import time
-import json
-import struct
-from datetime import datetime
+
 
 # audio setting
 FORMAT = pyaudio.paInt16
@@ -149,90 +146,3 @@ def decompress_image(image_bytes):
     image = Image.open(img_byte_arr)
 
     return image
-
-
-def capture_video_frame():
-    """捕获视频帧"""
-    cap = cv2.VideoCapture(0)
-    ret, frame = cap.read()
-    cap.release()
-    return frame if ret else None
-
-
-def compress_frame(frame, quality=80):
-    """压缩视频帧"""
-    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    return buffer.tobytes()
-
-
-def decompress_frame(buffer):
-    """解压视频帧"""
-    nparr = np.frombuffer(buffer, np.uint8)
-    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-
-class AudioHandler:
-    def __init__(self):
-        self.p = pyaudio.PyAudio()
-        self.stream = None
-
-    def start_recording(self):
-        """开始录音"""
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=44100,
-            input=True,
-            frames_per_buffer=1024
-        )
-
-    def stop_recording(self):
-        """停止录音"""
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-
-    def read_audio(self):
-        """读取音频数据"""
-        return self.stream.read(1024) if self.stream else None
-
-    def __del__(self):
-        self.p.terminate()
-
-
-def mix_audio_streams(streams):
-    """混合多个音频流"""
-    if not streams:
-        return None
-    # 将字节转换为数组
-    arrays = [np.frombuffer(s, dtype=np.int16) for s in streams]
-    # 确保所有数组长度相同
-    min_length = min(len(a) for a in arrays)
-    arrays = [a[:min_length] for a in arrays]
-    # 混合音频
-    mixed = np.mean(arrays, axis=0).astype(np.int16)
-    return mixed.tobytes()
-
-
-def create_message(msg_type, data):
-    """创建消息包"""
-    message = {
-        'type': msg_type,
-        'timestamp': datetime.now().isoformat(),
-        'data': data
-    }
-    return json.dumps(message).encode()
-
-
-def parse_message(message):
-    """解析消息包"""
-    try:
-        decoded = json.loads(message.decode())
-        return decoded['type'], decoded['timestamp'], decoded['data']
-    except:
-        return None, None, None
-
-
-def get_timestamp():
-    """获取当前时间戳"""
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
