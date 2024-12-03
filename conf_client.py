@@ -54,7 +54,7 @@ class ConferenceClient:
             return None
 
         try:
-            msg =  {'type':'create_conference','username': self.username}
+            msg =  'create'
             self.control_socket.send(msg)
 
             response = self.control_socket.recv(BUFFER_SIZE)
@@ -83,7 +83,7 @@ class ConferenceClient:
             return False
 
         try:
-            msg =  {'type':'join_conference','username': self.username,'conference_id': conference_id}
+            msg =  'join'+' '+conference_id
             self.control_socket.send(msg)
 
             response = self.control_socket.recv(BUFFER_SIZE)
@@ -116,10 +116,7 @@ class ConferenceClient:
             return False
 
         try:
-            msg = {'type':'quit_conference',
-                'username': self.username,
-                'conference_id': self.conference_id
-            }
+            msg = 'quit'+' '+self.conference_id
             self.control_socket.send(msg)
 
             response = self.control_socket.recv(BUFFER_SIZE)
@@ -149,10 +146,8 @@ class ConferenceClient:
         #todo:权限
         try:
             self.quit_conference()
-            msg = {'type': 'cancel_conference',
-                   'username': self.username,
-                   'conference_id': self.conference_id
-                   }
+            msg = 'cancel'+' '+self.conference_id
+
             self.control_socket.send(msg)
 
             response = self.control_socket.recv(BUFFER_SIZE)
