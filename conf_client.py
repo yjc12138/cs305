@@ -8,6 +8,8 @@ import numpy as np
 import traceback
 import asyncio
 
+from util import *
+import config
 
 def init_socket(port):
     try:
@@ -19,15 +21,13 @@ def init_socket(port):
         print(f"连接端口 {port} 时出错: {e}")
         return None
 
-
 class ConferenceClient:
     def __init__(self,):
-
-        self.is_connected= False
-        self.username=None
-        self.conference_id=None
-
         # sync client
+        self.is_connected = False
+        self.username = None
+        self.conference_id = None
+
         self.control_socket=None
         self.screen_socket=None
         self.camera_socket=None
@@ -210,7 +210,18 @@ class ConferenceClient:
         running task: output received stream data
         '''
 
+    def start_conference(self):
+        '''
+        init conns when create or join a conference with necessary conference_info
+        and
+        start necessary running task for conference
+        '''
 
+    def close_conference(self):
+        '''
+        close all conns to servers or other clients and cancel the running tasks
+        pay attention to the exception handling
+        '''
 
     def start(self):
         """
