@@ -143,7 +143,6 @@ class ConferenceClient:
         pass
 
 
-
     def output_data(self, data, type):
         '''
         running task: output received stream data
