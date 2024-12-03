@@ -28,15 +28,11 @@ class ConferenceServer:
         """
         while self.running:
             data_server = self.data_servers[data_type]
-            if data_type == 'screen':
-                data_port = CLIENT_SCREEN_PORT
-            elif data_type == 'camera':
-                data_port = CLIENT_CAMERA_PORT
-            else:
-                data_port = CLIENT_AUDIO_PORT
             data, addr = await data_server.recvfrom(1024)
             for client_ip in self.clients_info:
-                await data_server.sendto(data, (client_ip, data_port))
+                client_addr = client_ip.split(':')
+                if client_addr != addr:
+                    await data_server.sendto(data, client_addr)
 
     async def handle_text(self, reader, writer):
         while self.running:
