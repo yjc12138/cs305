@@ -1,20 +1,28 @@
 import asyncio
+import threading
 import uuid
 import socket
 
 from util import *
 
 class ConferenceServer:
-    def __init__(self, conference_id, server_ip, conf_serve_port):
+    def __init__(self, conference_id, server_ip, conf_server_port):
         self.conference_id = conference_id
         self.server_ip = server_ip
-        self.conf_server_port = conf_serve_port
+        self.conf_server_port = conf_server_port
+        # text_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # text_socket.bind((server_ip, conf_serve_port))
+        # text_socket.listen(10)
+        # text_socket.setblocking(False)
         screen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        screen_socket.bind((server_ip, conf_serve_port + 1))
+        screen_socket.bind((server_ip, conf_server_port + 1))
+        screen_socket.setblocking(False)
         camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        camera_socket.bind((server_ip, conf_serve_port + 2))
+        camera_socket.bind((server_ip, conf_server_port + 2))
+        camera_socket.setblocking(False)
         audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        audio_socket.bind((server_ip, conf_serve_port + 3))
+        audio_socket.bind((server_ip, conf_server_port + 3))
+        audio_socket.setblocking(False)
         self.data_servers = {'screen': screen_socket, 'camera': camera_socket, 'audio': audio_socket}
         self.data_types = ['screen', 'camera', 'audio']
         self.clients_info = []
@@ -26,43 +34,46 @@ class ConferenceServer:
         """
         running task: receive sharing stream data from a client and decide how to forward them to the rest clients
         """
+        print(f'handle {data_type} data')
         while self.running:
             data_server = self.data_servers[data_type]
-            data, addr = await data_server.recvfrom(1024)
-            for client_ip in self.clients_info:
-                client_addr = client_ip.split(':')
-                if client_addr != addr:
-                    await data_server.sendto(data, client_addr)
+            try:
+                data, addr = await data_server.recvfrom(1024)
+                for client_ip in self.clients_info:
+                    client_addr = client_ip.split(':')
+                    if client_addr != addr:
+                        await data_server.sendto(data, client_addr)
+            except BlockingIOError as e:
+                pass
 
     async def handle_text(self, reader, writer):
         while self.running:
-            data = await reader.read(1024)
-            if data:
-                for client_conn in self.client_conns:
-                    if client_conn != writer:
+            try:
+                data = await reader.read(1024)
+                addr = writer.get_extra_info('peername')
+                client_id = f"{addr[0]}:{addr[1]}"
+                if client_id in self.clients_info:
+                    self.client_conns[client_id] = writer
+                if data:
+                    for client_conn in self.client_conns:
+                        # if client_conn != writer:
                         client_conn.write(data)
                         await client_conn.drain()
+            except BlockingIOError as e:
+                pass
 
     def handle_client(self, client_id):
         """
-        conference_id: str ip
-
         running task: handle the in-meeting requests or messages from clients
         """
-        while self.running:
+        if self.running:
             if client_id in self.clients_info:
                 self.clients_info.remove(client_id)
+                self.client_conns[client_id].close()
                 self.client_conns.pop(client_id)
             else:
-                try:
-                    control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    control_socket.connect(client_id)
-                    self.client_conns[client_id] = control_socket
-                except socket.error as e:
-                    print(f'socket error: {e}')
-                    return
                 self.clients_info.append(client_id)
-
+                print(f'{client_id} has joined')
 
     async def log(self):
         while self.running:
@@ -84,16 +95,41 @@ class ConferenceServer:
         '''
         start the ConferenceServer and necessary running tasks to handle clients in this conference
         '''
+        def start_loop(loop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        async def event_loop():
+            print('event loop')
+            text_server = await asyncio.start_server(self.handle_text, self.server_ip, self.conf_server_port)
+            print('event loop running')
+            await text_server.serve_forever()
+            print('event loop done')
+
         self.running = True
-        loop = asyncio.get_event_loop()
-        tasks = [loop.create_task(self.handle_data('screen')),
-                 loop.create_task(self.handle_data('camera')),
-                 loop.create_task(self.handle_data('audio')),
-                 loop.create_task(asyncio.start_server(self.handle_text, self.server_ip, self.conf_server_port)),]
         try:
-            loop.run_until_complete(asyncio.gather(*tasks))
-        finally:
-            loop.close()
+            loop1 = asyncio.new_event_loop()
+            t1 = threading.Thread(target=start_loop, args=(loop1,))
+            t1.start()
+            asyncio.run_coroutine_threadsafe(self.handle_data(self.data_types[0]), loop1)
+
+            loop2 = asyncio.new_event_loop()
+            t2 = threading.Thread(target=start_loop, args=(loop2,))
+            t2.start()
+            asyncio.run_coroutine_threadsafe(self.handle_data(self.data_types[1]), loop2)
+
+            loop3 = asyncio.new_event_loop()
+            t3 = threading.Thread(target=start_loop, args=(loop3,))
+            t3.start()
+            asyncio.run_coroutine_threadsafe(self.handle_data(self.data_types[2]), loop3)
+
+            loop4 = asyncio.new_event_loop()
+            t4 = threading.Thread(target=start_loop, args=(loop4,))
+            t4.start()
+            asyncio.run_coroutine_threadsafe(event_loop(), loop4)
+            print(f'conference server running on port {self.conf_server_port}')
+        except Exception as e:
+            print(e)
 
 
 class MainServer:
@@ -106,16 +142,18 @@ class MainServer:
         self.conference_conns = None
         self.conference_servers = {}
 
-    def handle_create_conference(self):
+    def handle_create_conference(self, client_id):
         """
         create conference: create and start the corresponding ConferenceServer, and reply necessary info to client
         """
         conference_id = str(uuid.uuid4())
         conf_serve_ports = 8888 + len(self.conference_servers) * 4
-        conference_server = ConferenceServer(conference_id, conf_serve_ports)
+        conference_server = ConferenceServer(conference_id, self.server_ip, conf_serve_ports)
 
         self.conference_servers[conference_id] = conference_server
-        asyncio.create_task(conference_server.start())
+        conference_server.start()
+        print('started')
+        conference_server.handle_client(client_id)
         message = conference_id + " " + str(conf_serve_ports)
         return message
 
@@ -126,7 +164,7 @@ class MainServer:
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.handle_client(client_id)
-            message = "Client joined"
+            message = f"{conference_server.conf_server_port}:Client joined"
         else:
             message = "Conference not found"
         return message
@@ -138,6 +176,8 @@ class MainServer:
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.handle_client(client_id)
+            if len(conference_server.clients_info) == 0:
+                conference_server.cancel_conference()
             message = "Client removed"
         else:
             message = "Conference not found"
@@ -160,7 +200,9 @@ class MainServer:
         """
         running task: handle out-meeting (or also in-meeting) requests from clients
         """
+        print(111)
         data = await reader.read(1024)
+        print(222)
         message = data.decode()
         addr = writer.get_extra_info('peername')
 
@@ -168,7 +210,7 @@ class MainServer:
 
         if message.startswith("create"):
             print(f"{client_id}: create conference")
-            response = self.handle_create_conference()
+            response = self.handle_create_conference(client_id)
         elif message.startswith("join"):
             conference_id = message.split()[1]
             print(f"{client_id}: join conference {conference_id}")
@@ -185,7 +227,8 @@ class MainServer:
             print("wrong command")
             response = "wrong message"
 
-        writer.write(response)
+        print(response)
+        writer.write(response.encode())
         await writer.drain()
         writer.close()
 
@@ -197,5 +240,5 @@ class MainServer:
 
 
 if __name__ == '__main__':
-    server = MainServer("127.0.0.1", 8000)
+    server = MainServer(SERVER_IP, MAIN_SERVER_PORT)
     asyncio.run(server.start())
