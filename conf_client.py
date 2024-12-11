@@ -1,17 +1,8 @@
 import socket
-import threading
-from config import *
-from util import *
-import cv2
-import select
-import numpy as np
 import traceback
-import time
 import asyncio
-from threading import Thread
 
 from util import *
-import config
 
 cap=cv2.VideoCapture(0)
 
@@ -19,7 +10,7 @@ cap=cv2.VideoCapture(0)
 def init_socket(port):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('localhost', port))
+        sock.bind((SERVER_IP, port))
         return sock
     except Exception as e:
         print(f"连接时出错: {e}")
@@ -57,36 +48,12 @@ class ConferenceClient:
         self.reader = None
         self.writer = None
 
-    def reconnect(self):
-        """重新连接到服务器"""
-        try:
-            if self.control_socket:
-                self.control_socket.close()
-            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.control_socket.connect((SERVER_IP, MAIN_SERVER_PORT))
-            self.is_connected = True
-            return True
-        except Exception as e:
-            print(f"重新连接失败: {e}")
-            self.is_connected = False
+    def create_conference(self):
+        if not self.is_connected:
+            print("请先连接服务器！")
             return False
 
-    def check_connection(self):
-        """检查连接是否活跃，如果不活跃则重新连接"""
         try:
-            # 尝试发送空消息来测试连接
-            self.control_socket.send(b'')
-            return True
-        except:
-            print("DEBUG: 连接已断开，尝试重新连接...")
-            return self.reconnect()
-
-    def create_conference(self):
-        try:
-            if not self.check_connection():
-                print("无法连接到服务器！")
-                return None
-
             print("DEBUG: 准备创建会议...")
             msg = str('create').encode()
             self.control_socket.send(msg)
@@ -98,10 +65,8 @@ class ConferenceClient:
             if conference_id:
                 print(f"会议创建成功！会议ID: {conference_id}")
                 self.conference_id = conference_id
+                self.join_conference(conference_id)
                 self.on_meeting = True
-                print("DEBUG: 保持连接状态...")
-                # 重新建立连接
-                self.reconnect()
                 return conference_id
             else:
                 print(f"创建会议失败")
@@ -128,19 +93,19 @@ class ConferenceClient:
 
             response = self.control_socket.recv(BUFFER_SIZE).decode()
             print(response)
-            port = int(response.split(":")[0])
+            port = int(response.split(':')[0])
 
             if port:
                 print("加入会议成功！")
                 self.conference_id = conference_id
                 self.on_meeting = True
-                self.screen_socket = init_socket(int(port) + 1)
-                self.camera_socket = init_socket(int(port) + 2)
-                self.audio_socket = init_socket(int(port) + 3)
+                self.screen_socket = init_socket(CLIENT_PORT + 2)
+                self.camera_socket = init_socket(CLIENT_PORT + 3)
+                self.audio_socket = init_socket(CLIENT_PORT + 4)
                 word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                word_socket.bind((SERVER_IP, CLIENT_PORT + 1))
                 word_socket.connect((SERVER_IP, port))
                 self.word_socket = word_socket
-                print("连接会议成功！")
                 #self.keep_recv_camera()
 
                 return True
@@ -162,13 +127,8 @@ class ConferenceClient:
             return False
 
         try:
-            self.reconnect()
             print("DEBUG: 准备发送退出请求...")
-            if not self.check_connection():
-                print("DEBUG: 连接已断开，尝试重连失败")
-                return False
 
-            print(f"DEBUG: 当前连接状态: {self.is_connected}")
             msg = str('quit' + ' ' + self.conference_id).encode()
             print(f"DEBUG: 发送消息: {msg}")
 
@@ -180,14 +140,8 @@ class ConferenceClient:
                 response = self.control_socket.recv(BUFFER_SIZE).decode()
                 print(f"DEBUG: 收到响应: {response}")
             except ConnectionAbortedError:
-                print("DEBUG: 连接已断开，尝试重连...")
-                if self.reconnect():
-                    # 重新发送退出请求
-                    self.control_socket.send(msg)
-                    response = self.control_socket.recv(BUFFER_SIZE).decode()
-                else:
-                    print("DEBUG: 重连失败")
-                    return False
+                print("DEBUG: 连接已断开")
+                return False
 
             if response:
                 print("已退出会议")
@@ -197,8 +151,6 @@ class ConferenceClient:
                 self.camera_socket = None
                 self.audio_socket = None
                 self.word_socket = None
-                # 重新建立连接
-                self.reconnect()
                 return True
             else:
                 print(f"退出会议失败")
@@ -212,7 +164,7 @@ class ConferenceClient:
             return False
 
     def cancel_conference(self):
-        if not self.is_connected and not self.reconnect():
+        if not self.is_connected:
             print("无法连接到服务器！")
             return False
 
@@ -243,8 +195,6 @@ class ConferenceClient:
                 print("已取消会议")
                 self.on_meeting = False
                 self.conference_id = None
-                # 重新建立连接
-                self.reconnect()
                 return True
             else:
                 print(f"取消会议失败")
@@ -352,9 +302,10 @@ class ConferenceClient:
         execute functions based on the command line input
         """
         try:
-            if not self.reconnect():
-                print("无法连接到服务器！")
-                return
+            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.control_socket.bind((SERVER_IP, CLIENT_PORT))
+            self.control_socket.connect((SERVER_IP, MAIN_SERVER_PORT))
+            self.is_connected = True
         except Exception as e:
             print(f"初始连接失败: {e}")
             self.is_connected = False
@@ -368,11 +319,6 @@ class ConferenceClient:
 
             recognized = True
             cmd_input = input(f'({status}) Please enter a operation (enter "?" to help): ').strip().lower()
-
-            # 在执行命令前检查连接状态
-            if not self.check_connection():
-                print("与服务器的连接已断开，请重试")
-                continue
 
             fields = cmd_input.split(maxsplit=1)
             if len(fields) == 1:
