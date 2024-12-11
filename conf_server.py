@@ -9,17 +9,20 @@ class ConferenceServer:
         self.conference_id = conference_id
         self.server_ip = server_ip
         self.conf_server_port = conf_server_port
-        text_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        text_socket.bind((server_ip, conf_server_port))
-        text_socket.listen(10)
-        screen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        screen_socket.bind((server_ip, conf_server_port + 1))
-        camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        camera_socket.bind((server_ip, conf_server_port + 2))
-        audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        audio_socket.bind((server_ip, conf_server_port + 3))
-        self.text_socket = text_socket
-        self.data_servers = {'screen': screen_socket, 'camera': camera_socket, 'audio': audio_socket}
+        try:
+            self.text_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.text_socket.bind((server_ip, conf_server_port))
+            self.text_socket.listen(20)
+            self.screen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.screen_socket.bind((server_ip, conf_server_port + 1))
+            self.camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.camera_socket.bind((server_ip, conf_server_port + 2))
+            self.audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.audio_socket.bind((server_ip, conf_server_port + 3))
+            self.text_socket = self.text_socket
+            self.data_servers = {'screen': self.screen_socket, 'camera': self.camera_socket, 'audio': self.audio_socket}
+        except Exception as e:
+            print(f'conference socket error:{e}')
         self.data_types = ['screen', 'camera', 'audio']
         self.clients_info = []
         self.client_conns = {}
@@ -31,18 +34,19 @@ class ConferenceServer:
         running task: receive sharing stream data from a client and decide how to forward them to the rest clients
         """
         while self.running:
-            data_server = self.data_servers[data_type]
-            data, addr = data_server.recvfrom(1024)
+            data_server = self.data_servers[self.data_types[data_type]]
+            data, addr = data_server.recvfrom(BUFFER_SIZE)
+            print(f'received {data_type} data from {addr}')
             for client_ip in self.clients_info:
-                client_addr = client_ip.split(':')
-                if client_addr != addr:
-                    data_server.sendto(data, client_addr)
+                client_addr = (client_ip.split(':')[0], int(client_ip.split(':')[1]) + data_type + 1)
+                print(f'send {data_type} data to {client_addr}')
+                data_server.sendto(data, client_addr)
 
     def handle_text(self):
         def handle(conn, client_id):
             while self.running:
                 try:
-                    data = conn.recv(1024)
+                    data = conn.recv(BUFFER_SIZE)
                     if client_id in self.clients_info:
                         self.client_conns[client_id] = conn
                     if data:
@@ -89,11 +93,11 @@ class ConferenceServer:
         start the ConferenceServer and necessary running tasks to handle clients in this conference
         '''
         self.running = True
-        t1 = threading.Thread(target=self.handle_data, args=(self.data_types[0],))
+        t1 = threading.Thread(target=self.handle_data, args=(0,))
         t1.start()
-        t2 = threading.Thread(target=self.handle_data, args=(self.data_types[1],))
+        t2 = threading.Thread(target=self.handle_data, args=(1,))
         t2.start()
-        t3 = threading.Thread(target=self.handle_data, args=(self.data_types[2],))
+        t3 = threading.Thread(target=self.handle_data, args=(2,))
         t3.start()
         t4 = threading.Thread(target=self.handle_text)
         t4.start()

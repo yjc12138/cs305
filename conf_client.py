@@ -1,6 +1,8 @@
 import socket
 import traceback
 import asyncio
+import time
+import multiprocessing
 
 from util import *
 
@@ -10,7 +12,7 @@ cap=cv2.VideoCapture(0)
 def init_socket(port):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((SERVER_IP, port))
+        sock.bind((CLIENT_IP, port))
         return sock
     except Exception as e:
         print(f"连接时出错: {e}")
@@ -25,10 +27,10 @@ class ConferenceClient:
         self.conference_id = None
         # udp
         self.screen_socket = None
-        self.screen_port = None
         self.camera_socket = None
-        self.camera_port = 5555
         self.audio_socket = None
+        self.screen_port = None
+        self.camera_port = None
         self.audio_port = None
         # tcp
         self.control_socket = None
@@ -99,15 +101,17 @@ class ConferenceClient:
                 print("加入会议成功！")
                 self.conference_id = conference_id
                 self.on_meeting = True
+                word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                word_socket.bind((CLIENT_IP, CLIENT_PORT + 1))
+                word_socket.connect((SERVER_IP, port))
+                self.word_socket = word_socket
                 self.screen_socket = init_socket(CLIENT_PORT + 2)
                 self.camera_socket = init_socket(CLIENT_PORT + 3)
                 self.audio_socket = init_socket(CLIENT_PORT + 4)
-                word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                word_socket.bind((SERVER_IP, CLIENT_PORT + 1))
-                word_socket.connect((SERVER_IP, port))
-                self.word_socket = word_socket
-                #self.keep_recv_camera()
-
+                self.screen_port = port + 1
+                self.camera_port = port + 2
+                self.audio_port = port + 3
+                self.join(port)
                 return True
             else:
                 print(f"加入会议失败 ")
@@ -207,20 +211,13 @@ class ConferenceClient:
             self.is_connected = False
             return False
 
-    async def keep_share_camera(self, send_conn,fps):
-        """
-        向服务器实时传输摄像头的视频流
-        :param send_conn: 发送数据的网络连接（如UDP socket）
-        :param capture_function: 捕获视频的函数，默认使用capture_camera
-        :param compress: 图像压缩函数，默认使用compress_image
-        :param fps_or_frequency: 视频发送的帧率（FPS）
-        """
-        interval=1.0/fps
+    def keep_share_camera(self, send_conn, fps):
+        interval = 1.0 / fps
         while self.on_meeting:  # 保证在会议进行时持续发送
             # 捕获摄像头图像
             try:
-                _,frame = cap.read()
-                frame= cv2.flip(frame, 1)
+                _, frame = cap.read()
+                frame = cv2.flip(frame, 1)
             except Exception as e:
                 print(f"捕获摄像头图像失败: {e}")
                 continue
@@ -233,19 +230,14 @@ class ConferenceClient:
                 send_conn.sendto(send_data, (SERVER_IP, self.camera_port))  # 发送数据
             except Exception as e:
                 print(f"发送视频帧失败: {e}")
-            await asyncio.sleep(interval)
+            time.sleep(interval)
 
-
-    async def keep_recv_camera(self, recv_conn):
-        '''
-        running task: keep receiving certain type of data (save or output)
-        you can create other functions for receiving various kinds of data
-        '''
+    def keep_recv_camera(self, recv_conn):
         while self.on_meeting:  # 保证在会议进行时持续接收数据
             try:
                 print("ready recv")
                 # 接收数据
-                data,_ = recv_conn.recvfrom(65536)
+                data, _ = recv_conn.recvfrom(65536)
                 if not data:
                     break  # 如果没有数据，表示连接已关闭或出现问题
                 print("recv data")
@@ -254,13 +246,13 @@ class ConferenceClient:
                 img = cv2.imdecode(data, 1)
                 print("show img")
                 # 显示或处理视频帧
-                cv2.imshow('c',img)
+                cv2.imshow('c', img)
                 cv2.waitKey(1)
 
             except Exception as e:
                 print(f"接收数据时发生错误: {e}")
                 break
-            await asyncio.sleep(0.02)
+            time.sleep(0.02)
 
     def keep_share_screen(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
         '''
@@ -269,12 +261,41 @@ class ConferenceClient:
         '''
         pass
 
-    def keep_share_audio(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
-        '''
-        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
-        you can create different functions for sharing various kinds of data
-        '''
-        pass
+    def keep_share_audio(self, send_conn):
+        try:
+            p1 = pyaudio.PyAudio()  # 实例化对象
+            stream1 = p1.open(format=FORMAT,
+                              channels=CHANNELS,
+                              rate=RATE,
+                              input=True,
+                              frames_per_buffer=CHUNK,
+                              input_device_index=1,
+                              )  # 打开流，传入响应参数
+            while True:
+                audio_data = stream1.read(CHUNK)
+                audio_data = np.frombuffer(audio_data, dtype=np.int16)[None, :]
+                try:
+                    print((SERVER_IP, self.audio_port))
+                    send_conn.sendto(audio_data, (SERVER_IP, self.audio_port))
+                except Exception as e:
+                    print(f"发送音频失败: {e}")
+        except Exception as e:
+            print(f"捕获音频失败: {e}")
+
+    def keep_recv_audio(self, recv_conn):
+        p = pyaudio.PyAudio()
+        stream = p.open(channels=CHANNELS,
+                        rate=RATE,
+                        output=True,
+                        format=FORMAT,
+                        )
+        while True:
+            try:
+                data, _ = recv_conn.recvfrom(BUFFER_SIZE)
+                stream.write(data, num_frames=CHUNK)
+            except Exception as e:
+                print(f"接收数据时发生错误: {e}")
+                break
 
     def keep_share_word(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
         '''
@@ -297,13 +318,35 @@ class ConferenceClient:
             except Exception as e:
                 print(f"显示摄像头视频时发生错误: {e}")
 
+    def join(self, port):
+        p1 = multiprocessing.Process(target=self.keep_share_audio, args=(self.audio_socket,))
+        p1.daemon = True
+        p1.start()
+
+        p2 = multiprocessing.Process(target=self.keep_recv_audio, args=(self.audio_socket,))
+        p2.daemon = True
+        p2.start()
+
+        p3 = multiprocessing.Process(target=self.keep_share_camera, args=(self.camera_socket, 50))
+        p3.daemon = True
+        p3.start()
+
+        p4 = multiprocessing.Process(target=self.keep_recv_camera, args=(self.camera_socket,))
+        p4.daemon = True
+        p4.start()
+
+        p1.join()
+        p2.join()
+        p3.join()
+        p4.join()
+
     def start(self):
         """
         execute functions based on the command line input
         """
         try:
             self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.control_socket.bind((SERVER_IP, CLIENT_PORT))
+            self.control_socket.bind((CLIENT_IP, CLIENT_PORT))
             self.control_socket.connect((SERVER_IP, MAIN_SERVER_PORT))
             self.is_connected = True
         except Exception as e:
@@ -346,16 +389,6 @@ class ConferenceClient:
 
             if not recognized:
                 print(f'[Warn]: Unrecognized cmd_input {cmd_input}')
-
-    async def test(self):
-        camera_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        #audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-        send_task_camera=asyncio.create_task(self.keep_share_camera(camera_socket,50))
-        rev_task_camera=asyncio.create_task(self.keep_recv_camera(camera_socket))
-        #send_task_audio=self.keep_share_audio(audio_socket,capture_voice)
-        #rev_task_audio=self.keep_recv_audio(audio_socket)
-        await asyncio.gather(send_task_camera, rev_task_camera)
 
 if __name__ == '__main__':
     client1 = ConferenceClient()
