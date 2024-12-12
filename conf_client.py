@@ -1,8 +1,8 @@
 import socket
-import traceback
-import asyncio
+import struct
+import threading
 import time
-import multiprocessing
+import traceback
 
 from util import *
 
@@ -26,15 +26,28 @@ class ConferenceClient:
         self.username = None
         self.conference_id = None
         # udp
-        self.screen_socket = None
-        self.camera_socket = None
-        self.audio_socket = None
         self.screen_port = None
         self.camera_port = None
         self.audio_port = None
-        # tcp
-        self.control_socket = None
-        self.word_socket = None
+        self.screen_socket = init_socket(CLIENT_PORT + 2)
+        self.camera_socket = init_socket(CLIENT_PORT + 3)
+        self.audio_socket = init_socket(CLIENT_PORT + 4)
+
+        # TCP
+        try:
+            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.control_socket.bind((CLIENT_IP, CLIENT_PORT))
+        except Exception as e:
+            print("初始化control_socket错误")
+            return
+
+        try:
+            word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            word_socket.bind((CLIENT_IP, CLIENT_PORT + 1))
+            self.word_socket = word_socket
+        except Exception as e:
+            print("初始化word_socket错误")
+            return
 
         self.is_working = True
         self.server_addr = None  # server addr
@@ -49,6 +62,10 @@ class ConferenceClient:
 
         self.reader = None
         self.writer = None
+
+        self.camera_flag = False
+        self.audio_flag = False
+        self.screen_flag = False
 
     def create_conference(self):
         if not self.is_connected:
@@ -98,20 +115,18 @@ class ConferenceClient:
             port = int(response.split(':')[0])
 
             if port:
-                print("加入会议成功！")
                 self.conference_id = conference_id
                 self.on_meeting = True
-                word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                word_socket.bind((CLIENT_IP, CLIENT_PORT + 1))
-                word_socket.connect((SERVER_IP, port))
-                self.word_socket = word_socket
-                self.screen_socket = init_socket(CLIENT_PORT + 2)
-                self.camera_socket = init_socket(CLIENT_PORT + 3)
-                self.audio_socket = init_socket(CLIENT_PORT + 4)
+                try:
+                    self.word_socket.connect((SERVER_IP, port))
+                except Exception as e:
+                    print("word_socket连接失败")
+                    return
                 self.screen_port = port + 1
                 self.camera_port = port + 2
                 self.audio_port = port + 3
-                self.join(port)
+                self.join()
+                print("加入会议成功！")
                 return True
             else:
                 print(f"加入会议失败 ")
@@ -151,10 +166,7 @@ class ConferenceClient:
                 print("已退出会议")
                 self.on_meeting = False
                 self.conference_id = None
-                self.screen_socket = None
-                self.camera_socket = None
-                self.audio_socket = None
-                self.word_socket = None
+                self.word_socket.close()
                 return True
             else:
                 print(f"退出会议失败")
@@ -213,7 +225,7 @@ class ConferenceClient:
 
     def keep_share_camera(self, send_conn, fps):
         interval = 1.0 / fps
-        while self.on_meeting:  # 保证在会议进行时持续发送
+        while self.on_meeting and  self.camera_flag:  # 保证在会议进行时持续发送
             # 捕获摄像头图像
             try:
                 _, frame = cap.read()
@@ -224,42 +236,96 @@ class ConferenceClient:
 
             # 压缩图像
             _, send_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
-
+            local_ip, local_port = send_conn.getsockname()
+            ip_address = local_ip.encode('utf-8')
+            port_number = struct.pack('!H', local_port)  # 转换为两个字节的大端格式
+            ip_length = struct.pack('!B', len(ip_address))
+            identifier = b'c'
+            send_data = identifier + ip_length + ip_address + port_number + send_data.tobytes()
             # 创建消息并发送
             try:
                 send_conn.sendto(send_data, (SERVER_IP, self.camera_port))  # 发送数据
             except Exception as e:
-                print(f"发送视频帧失败: {e}")
+                print(f"发送摄像头视频帧失败: {e}")
             time.sleep(interval)
 
-    def keep_recv_camera(self, recv_conn):
+    def keep_share_screen(self, send_conn, fps):
+        interval = 1.0 / fps
+        while self.on_meeting and self.screen_flag:
+            try:
+                frame = ImageGrab.grab()
+                frame = frame.resize((960, 540))
+                frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            except Exception as e:
+                print(f"捕获屏幕图像失败: {e}")
+                continue
+
+            _, send_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            local_ip, local_port = send_conn.getsockname()
+            ip_address = local_ip.encode('utf-8')
+            port_number = struct.pack('!H', local_port)  # 转换为两个字节的大端格式
+            ip_length = struct.pack('!B', len(ip_address))
+            identifier = b's'
+            send_data = identifier + ip_length + ip_address + port_number + send_data.tobytes()
+            try:
+                send_conn.sendto(send_data, (SERVER_IP, self.camera_port))  # 发送数据
+            except Exception as e:
+                print(f"发送屏幕视频帧失败: {e}")
+            time.sleep(interval)
+
+    def keep_recv_image(self, recv_conn):
+        dic = {}
+        screen = None
         while self.on_meeting:  # 保证在会议进行时持续接收数据
             try:
-                print("ready recv")
                 # 接收数据
                 data, _ = recv_conn.recvfrom(65536)
                 if not data:
+                    print("no data recved")
                     break  # 如果没有数据，表示连接已关闭或出现问题
-                print("recv data")
-                data = np.frombuffer(data, dtype=np.uint8)
+                identifier = data[0:1].decode('utf-8')
+                ip_length = data[1]
+                ip_address = data[2:2 + ip_length].decode('utf-8')
+                port = struct.unpack('!H', data[2 + ip_length:4 + ip_length])[0]
+                img_data = data[4 + ip_length:]
+                data = np.frombuffer(img_data, dtype=np.uint8)
                 # 处理视频帧
                 img = cv2.imdecode(data, 1)
-                print("show img")
-                # 显示或处理视频帧
-                cv2.imshow('c', img)
-                cv2.waitKey(1)
+                # 将BGR转换为RGB（适用于PIL）
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+                # 转换为PIL图像
+                pil_image = Image.fromarray(img_rgb)
+
+                if identifier == 'c':
+                    dic.update({(ip_address, port): pil_image})
+                elif identifier == 's':
+                    local_ip, local_port = recv_conn.getsockname()
+                    if ip_address == local_ip and port == local_port:
+                        screen = None
+                    else:
+                        screen = pil_image
+
+                if not (len(dic) == 0 and not screen):
+                    if len(dic) != 0:
+                        # print(1)
+                        img = overlay_camera_images(screen, [value for value in dic.values()])
+                    else:
+                        # print(2)
+                        img = overlay_camera_images(screen, None)
+
+                    img = np.array(img)
+
+                    # 确保图像维度正确
+                    if img.ndim == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+                    cv2.imshow('c', img)
+                    cv2.waitKey(1)
 
             except Exception as e:
                 print(f"接收数据时发生错误: {e}")
                 break
-            time.sleep(0.02)
-
-    def keep_share_screen(self, send_conn, capture_function, compress=None, fps_or_frequency=30):
-        '''
-        running task: keep sharing (capture and send) certain type of data from server or clients (P2P)
-        you can create different functions for sharing various kinds of data
-        '''
-        pass
 
     def keep_share_audio(self, send_conn):
         try:
@@ -271,11 +337,10 @@ class ConferenceClient:
                               frames_per_buffer=CHUNK,
                               input_device_index=1,
                               )  # 打开流，传入响应参数
-            while True:
+            while self.audio_flag:
                 audio_data = stream1.read(CHUNK)
                 audio_data = np.frombuffer(audio_data, dtype=np.int16)[None, :]
                 try:
-                    print((SERVER_IP, self.audio_port))
                     send_conn.sendto(audio_data, (SERVER_IP, self.audio_port))
                 except Exception as e:
                     print(f"发送音频失败: {e}")
@@ -318,35 +383,21 @@ class ConferenceClient:
             except Exception as e:
                 print(f"显示摄像头视频时发生错误: {e}")
 
-    def join(self, port):
-        p1 = multiprocessing.Process(target=self.keep_share_audio, args=(self.audio_socket,))
-        p1.daemon = True
-        p1.start()
+    def join(self):
 
-        p2 = multiprocessing.Process(target=self.keep_recv_audio, args=(self.audio_socket,))
-        p2.daemon = True
-        p2.start()
+        t1 = threading.Thread(target=self.keep_recv_audio, args=(self.audio_socket,))
+        t1.daemon = True
+        t1.start()
 
-        p3 = multiprocessing.Process(target=self.keep_share_camera, args=(self.camera_socket, 50))
-        p3.daemon = True
-        p3.start()
-
-        p4 = multiprocessing.Process(target=self.keep_recv_camera, args=(self.camera_socket,))
-        p4.daemon = True
-        p4.start()
-
-        p1.join()
-        p2.join()
-        p3.join()
-        p4.join()
+        t2 = threading.Thread(target=self.keep_recv_image, args=(self.camera_socket,))
+        t2.daemon = True
+        t2.start()
 
     def start(self):
         """
         execute functions based on the command line input
         """
         try:
-            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.control_socket.bind((CLIENT_IP, CLIENT_PORT))
             self.control_socket.connect((SERVER_IP, MAIN_SERVER_PORT))
             self.is_connected = True
         except Exception as e:
@@ -369,7 +420,6 @@ class ConferenceClient:
                     print(HELP)
                 elif cmd_input == 'create':
                     self.create_conference()
-                    # await self.create_conference()
                 elif cmd_input == 'quit':
                     self.quit_conference()
                 elif cmd_input == 'cancel':
@@ -381,7 +431,26 @@ class ConferenceClient:
                     input_conf_id = fields[1]
                     self.join_conference(input_conf_id)
                 elif fields[0] == 'camera' and fields[1] == 'enable':
-                    self.keep_share_camera()
+                    self.camera_flag = True
+                    t = threading.Thread(target=self.keep_share_camera, args=(self.camera_socket, 50))
+                    t.daemon = True
+                    t.start()
+                elif fields[0] == 'camera' and fields[1] == 'disable':
+                    self.camera_flag = False
+                elif fields[0] == 'audio' and fields[1] == 'enable':
+                    self.audio_flag = True
+                    t = threading.Thread(target=self.keep_share_audio, args=(self.audio_socket,))
+                    t.daemon = True
+                    t.start()
+                elif fields[0] == 'audio' and fields[1] == 'disable':
+                    self.audio_flag = False
+                elif fields[0] == 'screen' and fields[1] == 'enable':
+                    self.screen_flag = True
+                    t = threading.Thread(target=self.keep_share_screen, args=(self.camera_socket, 50))
+                    t.daemon = True
+                    t.start()
+                elif fields[0] == 'screen' and fields[1] == 'disable':
+                    self.screen_flag = False
                 else:
                     recognized = False
             else:

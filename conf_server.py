@@ -36,10 +36,8 @@ class ConferenceServer:
         while self.running:
             data_server = self.data_servers[self.data_types[data_type]]
             data, addr = data_server.recvfrom(BUFFER_SIZE)
-            print(f'received {data_type} data from {addr}')
             for client_ip in self.clients_info:
                 client_addr = (client_ip.split(':')[0], int(client_ip.split(':')[1]) + data_type + 1)
-                print(f'send {data_type} data to {client_addr}')
                 data_server.sendto(data, client_addr)
 
     def handle_text(self):
