@@ -146,3 +146,9 @@ def decompress_image(image_bytes):
     image = Image.open(img_byte_arr)
 
     return image
+
+def SUCCESS(str):
+    return "200:" + str
+
+def FAIL(str):
+    return "404:" + str

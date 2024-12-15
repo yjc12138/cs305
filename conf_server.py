@@ -53,12 +53,14 @@ class ConferenceServer:
                                 client_conn.send(data)
                 except Exception as e:
                     break
-        while True:
+        while self.running:
             new_client, client_address = self.text_socket.accept()
             client_id = f'{client_address[0]}:{client_address[1]}'
+            self.clients_info.append(client_id)
             print(f'{client_id} added into client_conns')
             self.client_conns[client_id] = new_client
             p = threading.Thread(target=handle, args=(new_client, client_id))
+            p.setDaemon(True)
             p.start()
 
     def handle_client(self, client_id):
@@ -68,23 +70,23 @@ class ConferenceServer:
         if self.running:
             if client_id in self.clients_info:
                 self.clients_info.remove(client_id)
-                print(self.client_conns)
                 self.client_conns[client_id].close()
                 self.client_conns.pop(client_id)
-            else:
-                self.clients_info.append(client_id)
-                print(f'{client_id} has joined')
 
     def cancel_conference(self):
         """
         handle cancel conference request: disconnect all connections to cancel the conference
         """
         if self.running:
-            for client_conn in self.client_conns:
+            for client_conn in self.client_conns.values():
                 client_conn.close()
             self.client_conns.clear()
             self.clients_info.clear()
             self.running = False
+            self.text_socket.close()
+            self.screen_socket.close()
+            self.camera_socket.close()
+            self.audio_socket.close()
 
     def start(self):
         '''
@@ -92,12 +94,16 @@ class ConferenceServer:
         '''
         self.running = True
         t1 = threading.Thread(target=self.handle_data, args=(0,))
+        t1.setDaemon(True)
         t1.start()
         t2 = threading.Thread(target=self.handle_data, args=(1,))
+        t2.setDaemon(True)
         t2.start()
         t3 = threading.Thread(target=self.handle_data, args=(2,))
+        t3.setDaemon(True)
         t3.start()
         t4 = threading.Thread(target=self.handle_text)
+        t4.setDaemon(True)
         t4.start()
         print(f'conference server running on port {self.conf_server_port}')
 
@@ -122,7 +128,7 @@ class MainServer:
 
         self.conference_servers[conference_id] = conference_server
         conference_server.start()
-        message = conference_id + " " + str(conf_serve_ports)
+        message = SUCCESS(conference_id + " " + str(conf_serve_ports))
         return message
 
     def handle_join_conference(self, conference_id, client_id):
@@ -132,9 +138,9 @@ class MainServer:
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.handle_client(client_id)
-            message = f"{conference_server.conf_server_port}:Client joined"
+            message = SUCCESS(f"{conference_server.conf_server_port} Client joined")
         else:
-            message = "Conference not found"
+            message = FAIL("Conference not found")
         return message
 
     def handle_quit_conference(self, conference_id, client_id):
@@ -146,9 +152,10 @@ class MainServer:
             conference_server.handle_client(client_id)
             if len(conference_server.clients_info) == 0:
                 conference_server.cancel_conference()
-            message = "Client removed"
+                del self.conference_servers[conference_id]
+            message = SUCCESS("Client removed")
         else:
-            message = "Conference not found"
+            message = FAIL("Conference not found")
         return message
 
     def handle_cancel_conference(self, conference_id):
@@ -159,9 +166,9 @@ class MainServer:
             conference_server = self.conference_servers[conference_id]
             conference_server.cancel_conference()
             del self.conference_servers[conference_id]
-            message = "Conference cancelled"
+            message = SUCCESS("Conference cancelled")
         else:
-            message = "Conference not found"
+            message = FAIL("Conference not found")
         return message
 
     def request_handler(self, client_socket, client_address):
@@ -170,30 +177,33 @@ class MainServer:
         """
 
         while True:
-            data = client_socket.recv(BUFFER_SIZE)
-            client_id = f'{client_address[0]}:{client_address[1] + 1}'
-            message = data.decode()
-            if message.startswith("create"):
-                print(f"{client_address}: create conference")
-                response = self.handle_create_conference()
-            elif message.startswith("join"):
-                conference_id = message.split()[1]
-                print(f"{client_address}: join conference {conference_id}")
-                response = self.handle_join_conference(conference_id, client_id)
-            elif message.startswith("quit"):
-                conference_id = message.split()[1]
-                print(f"{client_address}: quit conference {conference_id}")
-                response = self.handle_quit_conference(conference_id, client_id)
-            elif message.startswith("cancel"):
-                conference_id = message.split()[1]
-                print(f"{client_address}: cancel conference {conference_id}")
-                response = self.handle_cancel_conference(conference_id)
-            else:
-                print("wrong command")
-                response = "wrong message"
+            try:
+                data = client_socket.recv(BUFFER_SIZE)
+                client_id = f'{client_address[0]}:{client_address[1] + 1}'
+                message = data.decode()
+                if message.startswith("create"):
+                    print(f"{client_address}: create conference")
+                    response = self.handle_create_conference()
+                elif message.startswith("join"):
+                    conference_id = message.split()[1]
+                    print(f"{client_address}: join conference {conference_id}")
+                    response = self.handle_join_conference(conference_id, client_id)
+                elif message.startswith("quit"):
+                    conference_id = message.split()[1]
+                    print(f"{client_address}: quit conference {conference_id}")
+                    response = self.handle_quit_conference(conference_id, client_id)
+                elif message.startswith("cancel"):
+                    conference_id = message.split()[1]
+                    print(f"{client_address}: cancel conference {conference_id}")
+                    response = self.handle_cancel_conference(conference_id)
+                else:
+                    response = FAIL("Wrong command")
 
-            print(response)
-            client_socket.sendall(response.encode())
+                print(response)
+                client_socket.sendall(response.encode())
+            except ConnectionResetError as e:
+                print(e)
+                break
 
     def start(self):
         print(f"Starting server at {self.server_ip}:{self.server_port}")

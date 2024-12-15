@@ -6,7 +6,11 @@ import traceback
 
 from util import *
 
-cap=cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0)
+if cap.isOpened():
+    can_capture_camera = True
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
 
 
 def init_socket(port):
@@ -29,10 +33,12 @@ class ConferenceClient:
         self.screen_port = None
         self.camera_port = None
         self.audio_port = None
-        self.screen_socket = init_socket(CLIENT_PORT + 2)
         self.camera_socket = init_socket(CLIENT_PORT + 3)
         self.audio_socket = init_socket(CLIENT_PORT + 4)
 
+        self.dic = {}
+        self.screen = None
+        self.screen_addr = None
         # TCP
         try:
             self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -40,14 +46,8 @@ class ConferenceClient:
         except Exception as e:
             print("初始化control_socket错误")
             return
-
-        try:
-            word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            word_socket.bind((CLIENT_IP, CLIENT_PORT + 1))
-            self.word_socket = word_socket
-        except Exception as e:
-            print("初始化word_socket错误")
-            return
+        self.word_socket = None
+        self.screen_socket = None
 
         self.is_working = True
         self.server_addr = None  # server addr
@@ -79,9 +79,9 @@ class ConferenceClient:
             print("DEBUG: 等待服务器响应...")
             response = self.control_socket.recv(BUFFER_SIZE).decode()
             print(f"DEBUG: 收到响应: {response}")
-            conference_id, port = response.split()
-
-            if conference_id:
+            sign, message = response.split(":")
+            conference_id, port = message.split(" ")
+            if int(sign) == 200:
                 print(f"会议创建成功！会议ID: {conference_id}")
                 self.conference_id = conference_id
                 self.join_conference(conference_id)
@@ -112,24 +112,36 @@ class ConferenceClient:
 
             response = self.control_socket.recv(BUFFER_SIZE).decode()
             print(response)
-            port = int(response.split(':')[0])
 
-            if port:
+            sign, message = response.split(":")
+
+            if int(sign) == 200:
+                port = int(message.split(' ')[0])
                 self.conference_id = conference_id
                 self.on_meeting = True
                 try:
-                    self.word_socket.connect((SERVER_IP, port))
+                    word_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    word_socket.bind((CLIENT_IP, CLIENT_PORT + 1))
+                    word_socket.connect((SERVER_IP, port))
+                    self.word_socket = word_socket
                 except Exception as e:
-                    print("word_socket连接失败")
+                    print(f"word_socket连接失败:{e}")
                     return
-                self.screen_port = port + 1
+                try:
+                    screen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    screen_socket.bind((CLIENT_IP, CLIENT_PORT + 2))
+                    screen_socket.connect((SERVER_IP, port + 1))
+                    self.screen_socket = screen_socket
+                except Exception as e:
+                    print(f"screen_socket连接失败:{e}")
+                    return
                 self.camera_port = port + 2
                 self.audio_port = port + 3
                 self.join()
                 print("加入会议成功！")
                 return True
             else:
-                print(f"加入会议失败 ")
+                print(f"加入会议失败:{message}")
                 return False
 
         except Exception as e:
@@ -162,11 +174,13 @@ class ConferenceClient:
                 print("DEBUG: 连接已断开")
                 return False
 
-            if response:
+            sign, message = response.split(":")
+            if int(sign) == 200:
                 print("已退出会议")
                 self.on_meeting = False
                 self.conference_id = None
                 self.word_socket.close()
+                self.screen_socket.close()
                 return True
             else:
                 print(f"退出会议失败")
@@ -179,20 +193,17 @@ class ConferenceClient:
             self.is_connected = False
             return False
 
-    def cancel_conference(self):
+    def cancel_conference(self, conference = None):
         if not self.is_connected:
             print("无法连接到服务器！")
             return False
 
         try:
             # 保存会议ID，因为quit_conference会将其设为None
-            conference_id = self.conference_id
-
-            # 先退出会议
-            if self.on_meeting:
-                if not self.quit_conference():
-                    print("退出会议失败，无法取消会议")
-                    return False
+            if not conference:
+                conference_id = self.conference_id
+            else:
+                conference_id = conference
 
             if not conference_id:
                 print("没有可取消的会议")
@@ -207,13 +218,15 @@ class ConferenceClient:
             response = self.control_socket.recv(BUFFER_SIZE).decode()
             print(f"DEBUG: 收到响应: {response}")
 
-            if response:
+            sign, message = response.split(":")
+            if int(sign) == 200:
                 print("已取消会议")
                 self.on_meeting = False
                 self.conference_id = None
+                self.word_socket.close()
                 return True
             else:
-                print(f"取消会议失败")
+                print(f"取消会议失败:{message}")
                 return False
 
         except Exception as e:
@@ -225,7 +238,7 @@ class ConferenceClient:
 
     def keep_share_camera(self, send_conn, fps):
         interval = 1.0 / fps
-        while self.on_meeting and  self.camera_flag:  # 保证在会议进行时持续发送
+        while self.on_meeting and self.camera_flag:  # 保证在会议进行时持续发送
             # 捕获摄像头图像
             try:
                 _, frame = cap.read()
@@ -249,33 +262,105 @@ class ConferenceClient:
                 print(f"发送摄像头视频帧失败: {e}")
             time.sleep(interval)
 
-    def keep_share_screen(self, send_conn, fps):
+    def stop_camera(self, send_conn):
+        local_ip, local_port = send_conn.getsockname()
+        ip_address = local_ip.encode('utf-8')
+        port_number = struct.pack('!H', local_port)  # 转换为两个字节的大端格式
+        ip_length = struct.pack('!B', len(ip_address))
+        identifier = b'd'
+        send_data = identifier + ip_length + ip_address + port_number
+        try:
+            send_conn.sendto(send_data, (SERVER_IP, self.camera_port))  # 发送数据
+        except Exception as e:
+            print(f"发送屏幕视频帧失败: {e}")
+
+    def keep_share_screen(self, send_conn, fps, stop_screen=False):
+        if stop_screen:
+            stop_message = "stop screen"
+            send_conn.sendall(stop_message.encode('utf-8'))
+            print("已发送停止信号")
+            return
         interval = 1.0 / fps
         while self.on_meeting and self.screen_flag:
             try:
-                frame = ImageGrab.grab()
-                frame = frame.resize((960, 540))
-                frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+                screen = ImageGrab.grab()
+                screen = screen.resize((1920, 1080))
+                frame = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
             except Exception as e:
                 print(f"捕获屏幕图像失败: {e}")
                 continue
 
-            _, send_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            send_data = encoded.tobytes()
             local_ip, local_port = send_conn.getsockname()
             ip_address = local_ip.encode('utf-8')
             port_number = struct.pack('!H', local_port)  # 转换为两个字节的大端格式
             ip_length = struct.pack('!B', len(ip_address))
             identifier = b's'
-            send_data = identifier + ip_length + ip_address + port_number + send_data.tobytes()
+            send_data = identifier + ip_length + ip_address + port_number + send_data
+            data_length = len(send_data)
             try:
-                send_conn.sendto(send_data, (SERVER_IP, self.camera_port))  # 发送数据
+                send_conn.sendall(data_length.to_bytes(8, 'big'))
+                send_conn.sendall(send_data)
             except Exception as e:
                 print(f"发送屏幕视频帧失败: {e}")
             time.sleep(interval)
 
+    def keep_recv_screen(self, recv_conn):
+        try:
+            while True:
+                print("等待接收数据长度...")
+                # 接收数据长度
+                length_data = recv_conn.recv(8192)
+                if not length_data:
+                    print("未收到数据长度，连接可能已断开")
+                    break
+                if length_data.decode('utf-8') == "stop screen":
+                    self.screen = None
+                data_length = int.from_bytes(length_data, 'big')
+                print(f"接收到数据长度: {data_length}")
+                # 接收图像数据
+                print("开始接收图像数据...")
+                data = b''
+                cnt = 0
+                while len(data) < data_length:
+                    cnt += 1
+                    chunk = recv_conn.recv(min(data_length - len(data), 65500))
+                    if not chunk:
+                        print("接收图像数据时连接断开")
+                        break
+                    if cnt == 1:
+                        identifier = chunk[0:1].decode('utf-8')
+                        ip_length = chunk[1]
+                        ip_address = chunk[2:2 + ip_length].decode('utf-8')
+                        port = struct.unpack('!H', chunk[2 + ip_length:4 + ip_length])[0]
+                        self.screen_addr = (ip_address, port)
+                        local_ip, local_port = recv_conn.getsockname()
+                        if ip_address == local_ip and port == local_port:
+                            self.screen = None
+                            return
+                        chunk = data[4 + ip_length:]
+                    data += chunk
+                    print(f"已接收: {len(data)}/{data_length} 字节")
+                print("开始解码图像...")
+                # 解码并显示图像
+                nparr = np.frombuffer(data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                self.screen = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                print(f"解码结果: {'成功' if frame is not None else '失败'}")
+
+                if frame is not None:
+                    print("显示图像...")
+                    cv2.imshow('Shared Screen', frame)
+                    cv2.waitKey(1)
+                    print("图像显示完成")
+                else:
+                    print("frame为空，无法显示")
+        except Exception as e:
+            print(f"接收屏幕错误: {e}")
+            print("错误详细信息:", traceback.format_exc())
+
     def keep_recv_image(self, recv_conn):
-        dic = {}
-        screen = None
         while self.on_meeting:  # 保证在会议进行时持续接收数据
             try:
                 # 接收数据
@@ -287,45 +372,50 @@ class ConferenceClient:
                 ip_length = data[1]
                 ip_address = data[2:2 + ip_length].decode('utf-8')
                 port = struct.unpack('!H', data[2 + ip_length:4 + ip_length])[0]
-                img_data = data[4 + ip_length:]
-                data = np.frombuffer(img_data, dtype=np.uint8)
-                # 处理视频帧
-                img = cv2.imdecode(data, 1)
-                # 将BGR转换为RGB（适用于PIL）
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                if identifier == 'd':
+                    key = (ip_address, port)  # 要删除的键
+                    if key in self.dic:  # 检查键是否存在，避免 KeyError
+                        del self.dic[key]
+                    # 检查 dic 是否为空
+                    if not self.dic and not self.screen:  # 如果 dic 为空
+                        cv2.destroyWindow('c')  # 关闭窗口
+                else:
+                    img_data = data[4 + ip_length:]
+                    data = np.frombuffer(img_data, dtype=np.uint8)
+                    # 处理视频帧
+                    img = cv2.imdecode(data, 1)
+                    # 将BGR转换为RGB（适用于PIL）
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-                # 转换为PIL图像
-                pil_image = Image.fromarray(img_rgb)
+                    # 转换为PIL图像
+                    pil_image = Image.fromarray(img_rgb)
 
-                if identifier == 'c':
-                    dic.update({(ip_address, port): pil_image})
-                elif identifier == 's':
-                    local_ip, local_port = recv_conn.getsockname()
-                    if ip_address == local_ip and port == local_port:
-                        screen = None
-                    else:
-                        screen = pil_image
-
-                if not (len(dic) == 0 and not screen):
-                    if len(dic) != 0:
-                        # print(1)
-                        img = overlay_camera_images(screen, [value for value in dic.values()])
-                    else:
-                        # print(2)
-                        img = overlay_camera_images(screen, None)
-
-                    img = np.array(img)
-
-                    # 确保图像维度正确
-                    if img.ndim == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-                    cv2.imshow('c', img)
-                    cv2.waitKey(1)
-
+                    if identifier == 'c':
+                        self.dic.update({(ip_address, port): pil_image})
+                    elif identifier == 's':
+                        local_ip, local_port = recv_conn.getsockname()
+                        if ip_address == local_ip and port == local_port:
+                            screen = None
+                        else:
+                            screen = pil_image
             except Exception as e:
                 print(f"接收数据时发生错误: {e}")
                 break
+
+    def output_image(self):
+        while not (len(self.dic) == 0 and not self.screen):
+            if len(self.dic) != 0:
+                img = overlay_camera_images(self.screen, [value for value in self.dic.values()])
+            else:
+                img = overlay_camera_images(self.screen, None)
+
+            img = np.array(img)
+
+            if img.ndim == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+            cv2.imshow('c', img)
+            cv2.waitKey(1)
 
     def keep_share_audio(self, send_conn):
         try:
@@ -369,20 +459,6 @@ class ConferenceClient:
         '''
         pass
 
-    def output_data(self, data, type):
-        '''
-        running task: output received stream data
-        '''
-        if type == 'camera':
-            try:
-                if data:
-                    # 显示视频帧
-                    frame = resize_image_to_fit_screen(data, my_screen_size)
-                    cv2.imshow("Received Camera Feed", np.array(frame))  # 使用 OpenCV 显示视频
-                    cv2.waitKey(1)  # 确保显示更新
-            except Exception as e:
-                print(f"显示摄像头视频时发生错误: {e}")
-
     def join(self):
 
         t1 = threading.Thread(target=self.keep_recv_audio, args=(self.audio_socket,))
@@ -392,6 +468,14 @@ class ConferenceClient:
         t2 = threading.Thread(target=self.keep_recv_image, args=(self.camera_socket,))
         t2.daemon = True
         t2.start()
+
+        t3 = threading.Thread(target=self.output_image, args=())
+        t3.daemon = True
+        t3.start()
+
+        t4 = threading.Thread(target=self.keep_recv_screen, args=(self.screen_socket,))
+        t4.daemon = True
+        t4.start()
 
     def start(self):
         """
@@ -430,6 +514,9 @@ class ConferenceClient:
                 if fields[0] == 'join':
                     input_conf_id = fields[1]
                     self.join_conference(input_conf_id)
+                elif fields[0] == 'cancel':
+                    input_conf_id = fields[1]
+                    self.cancel_conference(input_conf_id)
                 elif fields[0] == 'camera' and fields[1] == 'enable':
                     self.camera_flag = True
                     t = threading.Thread(target=self.keep_share_camera, args=(self.camera_socket, 50))
@@ -437,6 +524,7 @@ class ConferenceClient:
                     t.start()
                 elif fields[0] == 'camera' and fields[1] == 'disable':
                     self.camera_flag = False
+                    self.stop_camera(self.camera_socket)
                 elif fields[0] == 'audio' and fields[1] == 'enable':
                     self.audio_flag = True
                     t = threading.Thread(target=self.keep_share_audio, args=(self.audio_socket,))
@@ -446,7 +534,7 @@ class ConferenceClient:
                     self.audio_flag = False
                 elif fields[0] == 'screen' and fields[1] == 'enable':
                     self.screen_flag = True
-                    t = threading.Thread(target=self.keep_share_screen, args=(self.camera_socket, 50))
+                    t = threading.Thread(target=self.keep_share_screen, args=(self.screen_socket, 50))
                     t.daemon = True
                     t.start()
                 elif fields[0] == 'screen' and fields[1] == 'disable':
