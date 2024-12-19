@@ -193,7 +193,7 @@ class ConferenceClient:
             self.is_connected = False
             return False
 
-    def cancel_conference(self, conference = None):
+    def cancel_conference(self, conference=None):
         if not self.is_connected:
             print("无法连接到服务器！")
             return False
@@ -236,7 +236,7 @@ class ConferenceClient:
             self.is_connected = False
             return False
 
-    def keep_share_camera(self, send_conn, fps):
+    def keep_share_camera(self, send_conn, fps,stop_camera=False):
         interval = 1.0 / fps
         while self.on_meeting and self.camera_flag:  # 保证在会议进行时持续发送
             # 捕获摄像头图像
@@ -276,7 +276,7 @@ class ConferenceClient:
 
     def keep_share_screen(self, send_conn, fps, stop_screen=False):
         if stop_screen:
-            stop_message = "stop screen"
+            stop_message = "stop"
             send_conn.sendall(stop_message.encode('utf-8'))
             print("已发送停止信号")
             return
@@ -286,18 +286,13 @@ class ConferenceClient:
                 screen = ImageGrab.grab()
                 screen = screen.resize((1920, 1080))
                 frame = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
+                #print(f'len of pic is {len(frame)}')
             except Exception as e:
                 print(f"捕获屏幕图像失败: {e}")
                 continue
 
             _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
             send_data = encoded.tobytes()
-            local_ip, local_port = send_conn.getsockname()
-            ip_address = local_ip.encode('utf-8')
-            port_number = struct.pack('!H', local_port)  # 转换为两个字节的大端格式
-            ip_length = struct.pack('!B', len(ip_address))
-            identifier = b's'
-            send_data = identifier + ip_length + ip_address + port_number + send_data
             data_length = len(send_data)
             try:
                 send_conn.sendall(data_length.to_bytes(8, 'big'))
@@ -308,54 +303,31 @@ class ConferenceClient:
 
     def keep_recv_screen(self, recv_conn):
         try:
-            while True:
-                print("等待接收数据长度...")
+            while self.on_meeting:
                 # 接收数据长度
-                length_data = recv_conn.recv(8192)
+                length_data = recv_conn.recv(8)
                 if not length_data:
-                    print("未收到数据长度，连接可能已断开")
                     break
-                if length_data.decode('utf-8') == "stop screen":
-                    self.screen = None
+                try:
+                    if length_data.decode('utf-8') == "stop":
+                        print("已接收到停止信号")
+                        self.screen = None
+                        continue
+                except:
+                    pass
                 data_length = int.from_bytes(length_data, 'big')
-                print(f"接收到数据长度: {data_length}")
-                # 接收图像数据
-                print("开始接收图像数据...")
                 data = b''
-                cnt = 0
                 while len(data) < data_length:
-                    cnt += 1
                     chunk = recv_conn.recv(min(data_length - len(data), 65500))
                     if not chunk:
                         print("接收图像数据时连接断开")
                         break
-                    if cnt == 1:
-                        identifier = chunk[0:1].decode('utf-8')
-                        ip_length = chunk[1]
-                        ip_address = chunk[2:2 + ip_length].decode('utf-8')
-                        port = struct.unpack('!H', chunk[2 + ip_length:4 + ip_length])[0]
-                        self.screen_addr = (ip_address, port)
-                        local_ip, local_port = recv_conn.getsockname()
-                        if ip_address == local_ip and port == local_port:
-                            self.screen = None
-                            return
-                        chunk = data[4 + ip_length:]
                     data += chunk
-                    print(f"已接收: {len(data)}/{data_length} 字节")
-                print("开始解码图像...")
                 # 解码并显示图像
                 nparr = np.frombuffer(data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                frame = cv2.imdecode(nparr, 1)
                 self.screen = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                print(f"解码结果: {'成功' if frame is not None else '失败'}")
 
-                if frame is not None:
-                    print("显示图像...")
-                    cv2.imshow('Shared Screen', frame)
-                    cv2.waitKey(1)
-                    print("图像显示完成")
-                else:
-                    print("frame为空，无法显示")
         except Exception as e:
             print(f"接收屏幕错误: {e}")
             print("错误详细信息:", traceback.format_exc())
@@ -373,9 +345,11 @@ class ConferenceClient:
                 ip_address = data[2:2 + ip_length].decode('utf-8')
                 port = struct.unpack('!H', data[2 + ip_length:4 + ip_length])[0]
                 if identifier == 'd':
+                    print(2)
                     key = (ip_address, port)  # 要删除的键
                     if key in self.dic:  # 检查键是否存在，避免 KeyError
                         del self.dic[key]
+                        print(1)
                     # 检查 dic 是否为空
                     if not self.dic and not self.screen:  # 如果 dic 为空
                         cv2.destroyWindow('c')  # 关闭窗口
@@ -392,30 +366,29 @@ class ConferenceClient:
 
                     if identifier == 'c':
                         self.dic.update({(ip_address, port): pil_image})
-                    elif identifier == 's':
-                        local_ip, local_port = recv_conn.getsockname()
-                        if ip_address == local_ip and port == local_port:
-                            screen = None
-                        else:
-                            screen = pil_image
+                    else:
+                        print("camera identifier 无法识别")
             except Exception as e:
                 print(f"接收数据时发生错误: {e}")
                 break
 
     def output_image(self):
-        while not (len(self.dic) == 0 and not self.screen):
-            if len(self.dic) != 0:
-                img = overlay_camera_images(self.screen, [value for value in self.dic.values()])
+        while True:
+            if len(self.dic) != 0 or self.screen:
+                if len(self.dic) != 0:
+                    img = overlay_camera_images(self.screen, [value for value in self.dic.values()])
+                else:
+                    img = overlay_camera_images(self.screen, None)
+
+                img = np.array(img)
+
+                if img.ndim == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+                cv2.imshow('c', img)
+                cv2.waitKey(1)
             else:
-                img = overlay_camera_images(self.screen, None)
-
-            img = np.array(img)
-
-            if img.ndim == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-            cv2.imshow('c', img)
-            cv2.waitKey(1)
+                continue
 
     def keep_share_audio(self, send_conn):
         try:
@@ -460,7 +433,6 @@ class ConferenceClient:
         pass
 
     def join(self):
-
         t1 = threading.Thread(target=self.keep_recv_audio, args=(self.audio_socket,))
         t1.daemon = True
         t1.start()
@@ -469,13 +441,13 @@ class ConferenceClient:
         t2.daemon = True
         t2.start()
 
-        t3 = threading.Thread(target=self.output_image, args=())
-        t3.daemon = True
-        t3.start()
-
         t4 = threading.Thread(target=self.keep_recv_screen, args=(self.screen_socket,))
         t4.daemon = True
         t4.start()
+
+        t3 = threading.Thread(target=self.output_image, args=())
+        t3.daemon = True
+        t3.start()
 
     def start(self):
         """
@@ -524,6 +496,9 @@ class ConferenceClient:
                     t.start()
                 elif fields[0] == 'camera' and fields[1] == 'disable':
                     self.camera_flag = False
+                    t = threading.Thread(target=self.keep_share_camera, args=(self.screen_socket, 50, True))
+                    t.daemon = True
+                    t.start()
                     self.stop_camera(self.camera_socket)
                 elif fields[0] == 'audio' and fields[1] == 'enable':
                     self.audio_flag = True
@@ -539,6 +514,9 @@ class ConferenceClient:
                     t.start()
                 elif fields[0] == 'screen' and fields[1] == 'disable':
                     self.screen_flag = False
+                    t = threading.Thread(target=self.keep_share_screen, args=(self.screen_socket, 50, True))
+                    t.daemon = True
+                    t.start()
                 else:
                     recognized = False
             else:
@@ -546,6 +524,7 @@ class ConferenceClient:
 
             if not recognized:
                 print(f'[Warn]: Unrecognized cmd_input {cmd_input}')
+
 
 if __name__ == '__main__':
     client1 = ConferenceClient()
