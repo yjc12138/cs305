@@ -24,7 +24,7 @@ class ConferenceServer:
             self.audio_socket.bind((server_ip, conf_server_port + 3))
             self.udp_servers = {'camera': self.camera_socket, 'audio': self.audio_socket}
         except Exception as e:
-            print(f'conference socket error:{e}')
+            return
         self.udp_types = ['camera', 'audio']
         self.clients_info = []
         self.text_conns = {}
@@ -34,18 +34,15 @@ class ConferenceServer:
         self.running = False
 
     def handle_udp(self, data_type):
-        """
-        running task: receive sharing stream data from a client and decide how to forward them to the rest clients
-        """
         while self.running:
             data_server = self.udp_servers[self.udp_types[data_type]]
             try:
                 data, addr = data_server.recvfrom(BUFFER_SIZE)
                 for client_ip in self.clients_info:
                     client_addr = (client_ip.split(':')[0], int(client_ip.split(':')[1]) + data_type + 2)
-                    data_server.sendto(data, client_addr)
+                    if client_addr != addr:
+                        data_server.sendto(data, client_addr)
             except Exception as e:
-                print(f'udp-{data_type} 已终止连接')
                 break
 
     def handle_text(self):
@@ -58,21 +55,19 @@ class ConferenceServer:
                             if client_conn != conn:
                                 client_conn.send(data)
                 except Exception as e:
-                    print(f'text连接已断开')
+                    conn.close()
                     break
         while self.running:
             try:
                 text_client, client_address = self.text_socket.accept()
                 if text_client:
                     client_id = f'{client_address[0]}:{client_address[1]}'
-                    self.handle_client(client_id)
                     self.text_conns[client_id] = text_client
                     print(f'{client_id} added into text_conns')
                     t = threading.Thread(target=handle, args=(text_client, ))
                     t.start()
             except Exception as e:
-                print("text已终止连接")
-                break
+                pass
 
     def handle_screen(self):
         def handle(conn):
@@ -84,7 +79,7 @@ class ConferenceServer:
                             if client_conn != conn:
                                 client_conn.send(data)
                 except Exception as e:
-                    print("screen连接已断开")
+                    conn.close()
                     break
         while self.running:
             try:
@@ -96,43 +91,24 @@ class ConferenceServer:
                     t = threading.Thread(target=handle, args=(screen_client, ))
                     t.start()
             except Exception as e:
-                print("screen已终止连接")
-                break
+                pass
 
     def handle_client(self, client_id):
-        """
-        running task: handle the in-meeting requests or messages from clients
-        """
         if self.running:
             if client_id in self.clients_info:
                 self.clients_info.remove(client_id)
-                self.text_conns[client_id].close()
-                self.screen_conns[client_id].close()
-                self.text_conns.pop(client_id)
-                self.screen_conns.pop(client_id)
-                if len(self.clients_info) == 2:
-                    self.mode = "P2P"
-                    for client_id, client_conn in self.text_conns.items():
-                        if client_id in self.clients_info:
-                            client_conn.send('Mode switch to P2P.')
+                if self.text_conns.get(client_id):
+                    self.text_conns[client_id].close()
+                    self.text_conns.pop(client_id)
+                if self.screen_conns.get(client_id):
+                    self.screen_conns[client_id].close()
+                    self.screen_conns.pop(client_id)
             else:
                 self.clients_info.append(client_id)
-                if len(self.clients_info) == 3:
-                    self.mode = "CS"
-                    for client_id, client_conn in self.text_conns.items():
-                        if client_id in self.clients_info:
-                            client_conn.send('Mode switch to CS.')
-
 
     def cancel_conference(self):
-        """
-        handle cancel conference request: disconnect all connections to cancel the conference
-        """
         if self.running:
             self.running = False
-            for client_id, client_conn in self.text_conns.items():
-                if client_id != self.host_id and client_id in self.clients_info:
-                    client_conn.send('Conference has been cancelled. Please press enter to cancel.')
             for text_conn in self.text_conns.values():
                 text_conn.close()
             for screen_conn in self.screen_conns.values():
@@ -146,9 +122,6 @@ class ConferenceServer:
             self.audio_socket.close()
 
     def start(self):
-        '''
-        start the ConferenceServer and necessary running tasks to handle clients in this conference
-        '''
         self.running = True
         t1 = threading.Thread(target=self.handle_udp, args=(0,))
         t1.start()
@@ -169,13 +142,11 @@ class MainServer:
 
         self.conference_conns = None
         self.conference_servers = {}
+        self.client_socket = {}
 
     def handle_create_conference(self, client_id):
-        """
-        create conference: create and start the corresponding ConferenceServer, and reply necessary info to client
-        """
         conference_id = str(uuid.uuid4())
-        conf_serve_ports = 8888 + len(self.conference_servers) * 4
+        conf_serve_ports = 12345 + len(self.conference_servers) * 4
         conference_server = ConferenceServer(conference_id, client_id, self.server_ip, conf_serve_ports)
 
         self.conference_servers[conference_id] = conference_server
@@ -184,38 +155,75 @@ class MainServer:
         return message
 
     def handle_join_conference(self, conference_id, client_id):
-        """
-        join conference: search corresponding conference_info and ConferenceServer, and reply necessary info to client
-        """
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
-            message = SUCCESS(f"{conference_server.conf_server_port} Client joined")
+            conference_server.handle_client(client_id)
+            if len(conference_server.clients_info) == 1:
+                message = SUCCESS(f"{0} {0} Client joined")
+            elif len(conference_server.clients_info) == 2:
+                client_a = conference_server.clients_info[0]
+                client_b = conference_server.clients_info[1]
+                client_a_address = client_a.split(":")[0]
+                client_a_port = client_a.split(":")[1]
+                client_b_address = client_b.split(":")[0]
+                client_b_port = client_b.split(":")[1]
+                message_for_a = f"Connect {client_b_address} {client_b_port}"
+                for client, client_conn in self.client_socket.items():
+                    client_tmp = f'{client.split(":")[0]}:{int(client.split(":")[1]) + 1}'
+                    if client_tmp == conference_server.clients_info[0]:
+                        client_conn.send(message_for_a.encode())
+                message = SUCCESS(f"{client_a_address} {client_a_port} Client joined")
+            else:
+                if len(conference_server.clients_info) == 3:
+                    conference_server.mode = "CS"
+                    for client, client_conn in self.client_socket.items():
+                        client_tmp = f'{client.split(":")[0]}:{int(client.split(":")[1]) + 1}'
+                        if client_tmp in conference_server.clients_info and client_tmp != client_id:
+                            message_to_other = f"Connect {SERVER_IP} {conference_server.conf_server_port}"
+                            client_conn.send(message_to_other.encode())
+                message = SUCCESS(f"{SERVER_IP} {conference_server.conf_server_port} Client joined")
         else:
             message = FAIL("Conference not found")
         return message
 
     def handle_quit_conference(self, conference_id, client_id):
-        """
-        quit conference (in-meeting request & or no need to request)
-        """
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             conference_server.handle_client(client_id)
-            if len(conference_server.clients_info) == 0:
+            if len(conference_server.clients_info) == 2:
+                conference_server.mode = "P2P"
+                client_a = conference_server.clients_info[0]
+                client_b = conference_server.clients_info[1]
+                client_a_address = client_a.split(":")[0]
+                client_a_port = client_a.split(":")[1]
+                client_b_address = client_b.split(":")[0]
+                client_b_port = client_b.split(":")[1]
+                message_for_a = f"Connect {client_b_address} {client_b_port}"
+                message_for_b = f"Connect {client_a_address} {client_a_port}"
+                for client, client_conn in self.client_socket.items():
+                    client_tmp = f'{client.split(":")[0]}:{int(client.split(":")[1]) + 1}'
+                    if client_tmp == conference_server.clients_info[0]:
+                        client_conn.send(message_for_a.encode())
+                    elif client_tmp == conference_server.clients_info[1]:
+                        client_conn.send(message_for_b.encode())
+            elif len(conference_server.clients_info) == 0:
                 conference_server.cancel_conference()
                 del self.conference_servers[conference_id]
+            client_new_id = f"{client_id.split(':')[0]}:{int(client_id.split(':')[1]) - 1}"
+            self.client_socket[client_new_id].send('Quitted'.encode())
             message = SUCCESS("Client removed")
         else:
             message = FAIL("Conference not found")
         return message
 
     def handle_cancel_conference(self, conference_id, client_id):
-        """
-        cancel conference (in-meeting request, a ConferenceServer should be closed by the MainServer)
-        """
         if conference_id in self.conference_servers:
             conference_server = self.conference_servers[conference_id]
             if client_id == conference_server.host_id:
+                for client, client_conn in self.client_socket.items():
+                    client_tmp = f'{client.split(":")[0]}:{int(client.split(":")[1]) + 1}'
+                    if client_tmp in conference_server.clients_info:
+                        client_conn.send('Cancelled'.encode())
                 conference_server.cancel_conference()
                 del self.conference_servers[conference_id]
                 message = SUCCESS("Conference cancelled")
@@ -226,10 +234,6 @@ class MainServer:
         return message
 
     def request_handler(self, client_socket, client_address):
-        """
-        running task: handle out-meeting (or also in-meeting) requests from clients
-        """
-
         while True:
             try:
                 data = client_socket.recv(BUFFER_SIZE)
@@ -255,8 +259,9 @@ class MainServer:
 
                 print(response)
                 client_socket.sendall(response.encode())
+                if response.startswith("404:You"):
+                    client_socket.sendall(response.encode())
             except Exception as e:
-                print(e)
                 break
 
     def start(self):
@@ -268,6 +273,8 @@ class MainServer:
 
         while True:
             client_socket, client_address = self.main_server.accept()
+            client_id = f'{client_address[0]}:{client_address[1]}'
+            self.client_socket[client_id] = client_socket
             client_handler = threading.Thread(target=self.request_handler, args=(client_socket, client_address))
             client_handler.start()
 
